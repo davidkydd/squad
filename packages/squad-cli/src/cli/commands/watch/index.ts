@@ -867,6 +867,21 @@ export async function runWatch(dest: string, options: WatchOptions | WatchConfig
     : [];
   if (crossRepoAdapters.length > 0) {
     console.log(`${DIM}Cross-repo monitoring: ${crossRepoAdapters.map(r => `${r.name} [${r.adapter.type}]`).join(', ')}${RESET}`);
+
+    // Verify auth for any cross-repo platforms not already checked
+    const crossRepoPlatforms = new Set(crossRepoAdapters.map(r => r.adapter.type));
+    if (crossRepoPlatforms.has('azure-devops') && adapter.type !== 'azure-devops') {
+      try { await execFileAsync('az', ['devops', '-h']); } catch {
+        fatal('az CLI not found — required for cross-repo ADO monitoring');
+      }
+      try { await execFileAsync('az', ['account', 'show']); } catch {
+        fatal('az CLI not authenticated — run: az login (required for cross-repo ADO monitoring)');
+      }
+    }
+    if (crossRepoPlatforms.has('github') && adapter.type !== 'github') {
+      if (!(await ghAvailable())) fatal('gh CLI not found — required for cross-repo GitHub monitoring');
+      if (!(await ghAuthenticated())) fatal('gh CLI not authenticated — required for cross-repo GitHub monitoring');
+    }
   }
 
   // Parse team.md

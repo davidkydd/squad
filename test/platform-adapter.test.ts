@@ -80,6 +80,16 @@ describe('parseGitHubRemote', () => {
     expect(result).toEqual({ owner: 'owner', repo: 'repo' });
   });
 
+  it('parses SSH URL with host alias (e.g. github.com-emu)', () => {
+    const result = parseGitHubRemote('git@github.com-emu:dakydd_microsoft/aks-o11y-squad.git');
+    expect(result).toEqual({ owner: 'dakydd_microsoft', repo: 'aks-o11y-squad' });
+  });
+
+  it('parses SSH URL with host alias without .git suffix', () => {
+    const result = parseGitHubRemote('git@github.com-work:myorg/myrepo');
+    expect(result).toEqual({ owner: 'myorg', repo: 'myrepo' });
+  });
+
   it('returns null for non-GitHub URLs', () => {
     expect(parseGitHubRemote('https://dev.azure.com/org/project/_git/repo')).toBeNull();
   });
@@ -213,13 +223,13 @@ describe('PlatformAdapter createWorkItem interface', () => {
         tags: options.tags ?? [],
         url: 'https://example.com/1',
       }),
-      addTag: async () => {},
-      removeTag: async () => {},
-      addComment: async () => {},
+      addTag: async () => { },
+      removeTag: async () => { },
+      addComment: async () => { },
       listPullRequests: async () => [],
       createPullRequest: async () => ({ id: 1, title: '', sourceBranch: '', targetBranch: '', status: 'active' as const, author: '', url: '' }),
-      mergePullRequest: async () => {},
-      createBranch: async () => {},
+      mergePullRequest: async () => { },
+      createBranch: async () => { },
     };
     expect(typeof mockAdapter.createWorkItem).toBe('function');
   });
@@ -237,13 +247,13 @@ describe('PlatformAdapter createWorkItem interface', () => {
         assignedTo: options.assignedTo,
         url: 'https://dev.azure.com/org/proj/_workitems/edit/99',
       }),
-      addTag: async () => {},
-      removeTag: async () => {},
-      addComment: async () => {},
+      addTag: async () => { },
+      removeTag: async () => { },
+      addComment: async () => { },
       listPullRequests: async () => [],
       createPullRequest: async () => ({ id: 1, title: '', sourceBranch: '', targetBranch: '', status: 'active' as const, author: '', url: '' }),
-      mergePullRequest: async () => {},
-      createBranch: async () => {},
+      mergePullRequest: async () => { },
+      createBranch: async () => { },
     };
 
     const wi = await mockAdapter.createWorkItem({
@@ -269,13 +279,13 @@ describe('PlatformAdapter createWorkItem interface', () => {
         tags: [],
         url: 'https://github.com/owner/repo/issues/10',
       }),
-      addTag: async () => {},
-      removeTag: async () => {},
-      addComment: async () => {},
+      addTag: async () => { },
+      removeTag: async () => { },
+      addComment: async () => { },
       listPullRequests: async () => [],
       createPullRequest: async () => ({ id: 1, title: '', sourceBranch: '', targetBranch: '', status: 'active' as const, author: '', url: '' }),
-      mergePullRequest: async () => {},
-      createBranch: async () => {},
+      mergePullRequest: async () => { },
+      createBranch: async () => { },
     };
 
     const wi = await mockAdapter.createWorkItem({ title: 'Quick fix' });
@@ -940,13 +950,13 @@ describe('ADO work item creation with custom types (mock adapter)', () => {
           url: `https://dev.azure.com/org/proj/_workitems/edit/42`,
         };
       },
-      addTag: async () => {},
-      removeTag: async () => {},
-      addComment: async () => {},
+      addTag: async () => { },
+      removeTag: async () => { },
+      addComment: async () => { },
       listPullRequests: async () => [],
       createPullRequest: async () => ({ id: 1, title: '', sourceBranch: '', targetBranch: '', status: 'active' as const, author: '', url: '' }),
-      mergePullRequest: async () => {},
-      createBranch: async () => {},
+      mergePullRequest: async () => { },
+      createBranch: async () => { },
     };
 
     await mockAdapter.createWorkItem({ title: 'Test', type: 'Scenario' });
@@ -963,13 +973,13 @@ describe('ADO work item creation with custom types (mock adapter)', () => {
         capturedType = options.type;
         return { id: 1, title: options.title, state: 'New', tags: [], url: '' };
       },
-      addTag: async () => {},
-      removeTag: async () => {},
-      addComment: async () => {},
+      addTag: async () => { },
+      removeTag: async () => { },
+      addComment: async () => { },
       listPullRequests: async () => [],
       createPullRequest: async () => ({ id: 1, title: '', sourceBranch: '', targetBranch: '', status: 'active' as const, author: '', url: '' }),
-      mergePullRequest: async () => {},
-      createBranch: async () => {},
+      mergePullRequest: async () => { },
+      createBranch: async () => { },
     };
 
     await mockAdapter.createWorkItem({ title: 'Fix crash', type: 'Bug' });

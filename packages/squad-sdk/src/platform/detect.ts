@@ -34,7 +34,8 @@ export function parseGitHubRemote(url: string): GitHubRemoteInfo | null {
   }
 
   // SSH: git@github.com:owner/repo.git
-  const sshMatch = url.match(/github\.com:([^/]+)\/([^/.]+?)(?:\.git)?$/i);
+  // Also handles SSH host aliases like github.com-emu, github.com-work, etc.
+  const sshMatch = url.match(/github\.com(?:-[a-zA-Z0-9_]+)?:([^/]+)\/([^/.]+?)(?:\.git)?$/i);
   if (sshMatch) {
     return { owner: sshMatch[1]!, repo: sshMatch[2]! };
   }
