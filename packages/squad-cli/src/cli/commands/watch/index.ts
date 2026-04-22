@@ -852,13 +852,17 @@ export async function runWatch(dest: string, options: WatchOptions | WatchConfig
     }
   }
 
-  // Verify platform CLI availability
-  if (adapter.type === 'github') {
-    if (!(await ghAvailable())) fatal('gh CLI not found — install from https://cli.github.com');
-    if (!(await ghAuthenticated())) fatal('gh CLI not authenticated — run: gh auth login');
-  } else if (adapter.type === 'azure-devops') {
-    try { await execFileAsync('az', ['devops', '-h']); } catch { fatal('az CLI not found'); }
-    try { await execFileAsync('az', ['account', 'show']); } catch { fatal('az CLI not authenticated — run: az login'); }
+  // Verify platform CLI availability (skip when coordinator scan is disabled)
+  if (!config.skipCoordinatorScan) {
+    if (adapter.type === 'github') {
+      if (!(await ghAvailable())) fatal('gh CLI not found — install from https://cli.github.com');
+      if (!(await ghAuthenticated())) fatal('gh CLI not authenticated — run: gh auth login');
+    } else if (adapter.type === 'azure-devops') {
+      try { await execFileAsync('az', ['devops', '-h']); } catch { fatal('az CLI not found'); }
+      try { await execFileAsync('az', ['account', 'show']); } catch { fatal('az CLI not authenticated — run: az login'); }
+    }
+  } else {
+    console.log(`${DIM}Coordinator-repo scan disabled (skipCoordinatorScan: true)${RESET}`);
   }
 
   // Resolve cross-repo adapters for multi-repo PR monitoring
@@ -903,7 +907,7 @@ export async function runWatch(dest: string, options: WatchOptions | WatchConfig
   }
 
   // Pre-create squad member labels so addTag never fails on missing labels
-  if (adapter.ensureTag) {
+  if (adapter.ensureTag && !config.skipCoordinatorScan) {
     for (const member of roster) {
       try {
         await adapter.ensureTag(member.label, { color: 'd4c5f9', description: `Squad triage: ${member.name}` });
@@ -1071,21 +1075,39 @@ export async function runWatch(dest: string, options: WatchOptions | WatchConfig
       console.log(`${DIM}📂 Discovered ${subSquads.length} subsquad(s): ${subSquads.map(s => s.name).join(', ')}${RESET}`);
     }
 
-    // Core: triage (always runs — not a capability)
-    const checkResult = await runCheck(rules, modules, roster, hasCopilot, autoAssign, capabilities, adapter, vlog);
-    const roundState = checkResult.state;
+    // Core: triage (always runs unless coordinator scan is disabled)
+    let roundState: BoardState;
+    if (config.skipCoordinatorScan) {
+      // Coordinator-only mode: skip issue/PR scan on the hosting repo
+      roundState = emptyBoardState();
+    } else {
+      const checkResult = await runCheck(rules, modules, roster, hasCopilot, autoAssign, capabilities, adapter, vlog);
+      roundState = checkResult.state;
 
-    // Short-circuit remaining phases when the scan failed or was rate-limited
-    if (checkResult.status !== 'ok') {
-      reportBoard(roundState, round, { scanStatus: checkResult.status });
-      const nextPollTime = new Date(Date.now() + interval * 60 * 1000);
-      console.log(`${DIM}Next poll at ${nextPollTime.toLocaleTimeString()}${RESET}`);
-      // Do NOT count a failed scan as a circuit-breaker success
-      if (cbState.status === 'half-open') {
-        cbState.consecutiveSuccesses = 0;
+      // Short-circuit remaining phases when the scan failed or was rate-limited
+      if (checkResult.status !== 'ok') {
+        reportBoard(roundState, round, { scanStatus: checkResult.status });
+        const nextPollTime = new Date(Date.now() + interval * 60 * 1000);
+        console.log(`${DIM}Next poll at ${nextPollTime.toLocaleTimeString()}${RESET}`);
+        // Do NOT count a failed scan as a circuit-breaker success
+        if (cbState.status === 'half-open') {
+          cbState.consecutiveSuccesses = 0;
+        }
+        saveCBState(squadDirInfo.path, cbState);
+        // Still do cross-repo checks even when coordinator scan fails
+        if (crossRepoAdapters.length > 0) {
+          console.log(`${BOLD}  📡 Cross-Repo PRs${RESET}`);
+          for (const crossRepo of crossRepoAdapters) {
+            try {
+              const crossPRState = await checkCrossRepoPRs(crossRepo.name, roster, crossRepo.adapter, vlog);
+              reportCrossRepoBoard(crossRepo.name, crossPRState, round);
+            } catch (e) {
+              console.log(`${YELLOW}⚠${RESET} [${crossRepo.name}] Cross-repo check failed: ${(e as Error).message}`);
+            }
+          }
+        }
+        return;
       }
-      saveCBState(squadDirInfo.path, cbState);
-      return;
     }
 
     // Phase 2: post-triage (two-pass hydration)

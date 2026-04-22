@@ -51,6 +51,9 @@ export interface WatchConfig {
   stateBackend?: 'worktree' | 'git-notes' | 'orphan' | 'external';
   /** Cross-repo monitoring: list of companion repos whose PRs should be watched. */
   repos?: CrossRepoEntry[];
+  /** When true, skip the coordinator-repo issue/PR scan (useful when the
+   *  hosting repo is purely orchestration and has no real issues/PRs). */
+  skipCoordinatorScan?: boolean;
 }
 
 const DEFAULTS: WatchConfig = {
@@ -110,6 +113,7 @@ export function loadWatchConfig(
     sentinelFile: cliOverrides.sentinelFile ?? fileConfig.sentinelFile,
     stateBackend: cliOverrides.stateBackend ?? fileConfig.stateBackend,
     repos: cliOverrides.repos ?? fileConfig.repos,
+    skipCoordinatorScan: cliOverrides.skipCoordinatorScan ?? fileConfig.skipCoordinatorScan ?? false,
   };
 
   return merged;
@@ -156,17 +160,19 @@ function normalizeFileConfig(raw: Record<string, unknown>): Partial<WatchConfig>
     const repos: CrossRepoEntry[] = [];
     for (const entry of raw['repos']) {
       if (typeof entry === 'object' && entry !== null &&
-          typeof (entry as Record<string, unknown>)['name'] === 'string' &&
-          typeof (entry as Record<string, unknown>)['path'] === 'string') {
+        typeof (entry as Record<string, unknown>)['name'] === 'string' &&
+        typeof (entry as Record<string, unknown>)['path'] === 'string') {
         repos.push({ name: (entry as Record<string, string>)['name']!, path: (entry as Record<string, string>)['path']! });
       }
     }
     if (repos.length > 0) result.repos = repos;
   }
 
+  if (typeof raw['skipCoordinatorScan'] === 'boolean') result.skipCoordinatorScan = raw['skipCoordinatorScan'];
+
   // Everything else is a capability key
   const caps: Record<string, boolean | Record<string, unknown>> = {};
-  const reserved = new Set(['interval', 'execute', 'maxConcurrent', 'timeout', 'copilotFlags', 'agentCmd', 'verbose', 'dispatchMode', 'logFile', 'authUser', 'notifyLevel', 'overnightStart', 'overnightEnd', 'sentinelFile', 'stateBackend', 'repos']);
+  const reserved = new Set(['interval', 'execute', 'maxConcurrent', 'timeout', 'copilotFlags', 'agentCmd', 'verbose', 'dispatchMode', 'logFile', 'authUser', 'notifyLevel', 'overnightStart', 'overnightEnd', 'sentinelFile', 'stateBackend', 'repos', 'skipCoordinatorScan']);
   for (const [key, value] of Object.entries(raw)) {
     if (reserved.has(key)) continue;
     if (typeof value === 'boolean' || (typeof value === 'object' && value !== null && !Array.isArray(value))) {
