@@ -36,7 +36,7 @@ import {
 import { createPlatformAdapter } from '@bradygaster/squad-sdk/platform';
 import type { PlatformAdapter, WorkItem, PullRequest as SdkPullRequest } from '@bradygaster/squad-sdk/platform';
 
-import type { WatchConfig } from './config.js';
+import type { WatchConfig, CrossRepoEntry } from './config.js';
 import type { WatchCapability, WatchContext, WatchPhase, CapabilityResult } from './types.js';
 import { CapabilityRegistry } from './registry.js';
 import { createDefaultRegistry } from './capabilities/index.js';
@@ -44,7 +44,7 @@ import { createVerboseLogger, type VerboseLogger } from './verbose.js';
 
 // ── Re-exports for backward compatibility ────────────────────────
 
-export type { WatchConfig } from './config.js';
+export type { WatchConfig, CrossRepoEntry } from './config.js';
 export { loadWatchConfig } from './config.js';
 export type { WatchCapability, WatchContext, WatchPhase, PreflightResult, CapabilityResult } from './types.js';
 export { CapabilityRegistry } from './registry.js';
@@ -98,10 +98,10 @@ function toWatchPullRequest(pr: SdkPullRequest): WatchPullRequest {
     isDraft: pr.status === 'draft',
     reviewDecision: pr.reviewStatus === 'approved' ? 'APPROVED'
       : pr.reviewStatus === 'changes-requested' ? 'CHANGES_REQUESTED'
-      : pr.reviewStatus === 'pending' ? 'REVIEW_REQUIRED' : '',
+        : pr.reviewStatus === 'pending' ? 'REVIEW_REQUIRED' : '',
     state: pr.status === 'active' ? 'OPEN'
       : pr.status === 'completed' ? 'MERGED'
-      : pr.status === 'abandoned' ? 'CLOSED' : 'OPEN',
+        : pr.status === 'abandoned' ? 'CLOSED' : 'OPEN',
     headRefName: pr.sourceBranch,
     statusCheckRollup: [],
   };
@@ -300,6 +300,136 @@ async function checkPRs(roster: ReturnType<typeof parseRoster>, adapter: Platfor
     readyToMerge: readyToMergeSet.size,
     totalOpen: squadPRs.length,
   };
+}
+
+// ── Cross-Repo PR Monitoring ─────────────────────────────────────
+
+/** Resolved cross-repo adapter ready for monitoring. */
+interface CrossRepoAdapter {
+  name: string;
+  path: string;
+  adapter: PlatformAdapter;
+}
+
+/**
+ * Check ALL open PRs in a companion repo (no squad label filter).
+ * Used for cross-repo monitoring where the coordinator reviews all PRs.
+ */
+async function checkCrossRepoPRs(
+  repoName: string,
+  roster: ReturnType<typeof parseRoster>,
+  adapter: PlatformAdapter,
+  vlog?: VerboseLogger,
+): Promise<PRBoardState> {
+  const timestamp = new Date().toLocaleTimeString();
+  const prs = await listWatchPullRequests(adapter, { state: 'open', limit: 30 });
+
+  vlog?.log(`[${repoName}] PRs found: ${prs.length} total (all open PRs)`);
+  for (const pr of prs) {
+    vlog?.log(`  [${repoName}] PR #${pr.number}: "${pr.title}" draft=${pr.isDraft} review=${pr.reviewDecision ?? 'none'}`);
+  }
+
+  if (prs.length === 0) {
+    return { drafts: 0, needsReview: 0, changesRequested: 0, ciFailures: 0, readyToMerge: 0, totalOpen: 0 };
+  }
+
+  const drafts = prs.filter(pr => pr.isDraft);
+  const changesRequested = prs.filter(pr => pr.reviewDecision === 'CHANGES_REQUESTED');
+  const approved = prs.filter(pr => pr.reviewDecision === 'APPROVED' && !pr.isDraft);
+  const ciFailures = prs.filter(pr =>
+    pr.statusCheckRollup?.some(check => check.state === 'FAILURE' || check.state === 'ERROR'),
+  );
+  const readyToMerge = approved.filter(pr =>
+    !pr.statusCheckRollup?.some(c => c.state === 'FAILURE' || c.state === 'ERROR' || c.state === 'PENDING'),
+  );
+  const changesRequestedSet = new Set(changesRequested.map(pr => pr.number));
+  const ciFailureSet = new Set(ciFailures.map(pr => pr.number));
+  const readyToMergeSet = new Set(readyToMerge.map(pr => pr.number));
+  const needsReview = prs.filter(pr =>
+    !pr.isDraft && !changesRequestedSet.has(pr.number) && !ciFailureSet.has(pr.number) && !readyToMergeSet.has(pr.number),
+  );
+
+  const memberNames = new Set(roster.map(m => m.name.toLowerCase()));
+
+  if (drafts.length > 0) {
+    console.log(`${DIM}[${timestamp}]${RESET} 🟡 [${repoName}] ${drafts.length} draft PR(s)`);
+    for (const pr of drafts) console.log(`  ${DIM}PR #${pr.number}: ${pr.title} (${pr.author.login})${RESET}`);
+  }
+  if (changesRequested.length > 0) {
+    console.log(`${YELLOW}[${timestamp}]${RESET} ⚠️ [${repoName}] ${changesRequested.length} PR(s) need revision`);
+    for (const pr of changesRequested) {
+      const owner = memberNames.has(pr.author.login.toLowerCase()) ? ` — ${pr.author.login}` : '';
+      console.log(`  PR #${pr.number}: ${pr.title} — changes requested${owner}`);
+    }
+  }
+  if (ciFailures.length > 0) {
+    console.log(`${RED}[${timestamp}]${RESET} ❌ [${repoName}] ${ciFailures.length} PR(s) with CI failures`);
+    for (const pr of ciFailures) {
+      const failedChecks = pr.statusCheckRollup?.filter(c => c.state === 'FAILURE' || c.state === 'ERROR') || [];
+      const owner = memberNames.has(pr.author.login.toLowerCase()) ? ` — ${pr.author.login}` : '';
+      console.log(`  PR #${pr.number}: ${pr.title}${owner} — ${failedChecks.map(c => c.name).join(', ')}`);
+    }
+  }
+  if (readyToMerge.length > 0) {
+    console.log(`${GREEN}[${timestamp}]${RESET} 🟢 [${repoName}] ${readyToMerge.length} PR(s) ready to merge`);
+    for (const pr of readyToMerge) console.log(`  PR #${pr.number}: ${pr.title} — approved, CI green`);
+  }
+  if (needsReview.length > 0) {
+    console.log(`${DIM}[${timestamp}]${RESET} 🔵 [${repoName}] ${needsReview.length} PR(s) awaiting review`);
+    for (const pr of needsReview) console.log(`  ${DIM}PR #${pr.number}: ${pr.title} (${pr.author.login})${RESET}`);
+  }
+
+  return {
+    drafts: drafts.length,
+    needsReview: needsReview.length,
+    changesRequested: changesRequestedSet.size,
+    ciFailures: ciFailureSet.size,
+    readyToMerge: readyToMergeSet.size,
+    totalOpen: prs.length,
+  };
+}
+
+/**
+ * Resolve cross-repo config entries into live adapters.
+ * Skips repos that don't exist or can't create an adapter.
+ */
+function resolveCrossRepoAdapters(
+  entries: CrossRepoEntry[],
+  teamRoot: string,
+): CrossRepoAdapter[] {
+  const adapters: CrossRepoAdapter[] = [];
+  for (const entry of entries) {
+    const resolvedPath = path.isAbsolute(entry.path)
+      ? entry.path
+      : path.resolve(teamRoot, entry.path);
+    if (!storage.existsSync(resolvedPath)) {
+      console.log(`${YELLOW}⚠️${RESET}  Cross-repo "${entry.name}" not found at ${resolvedPath} — skipping`);
+      continue;
+    }
+    try {
+      const adapter = createPlatformAdapter(resolvedPath);
+      adapters.push({ name: entry.name, path: resolvedPath, adapter });
+    } catch (e) {
+      console.log(`${YELLOW}⚠️${RESET}  Cross-repo "${entry.name}" adapter failed: ${(e as Error).message} — skipping`);
+    }
+  }
+  return adapters;
+}
+
+// ── Cross-Repo Board Report ──────────────────────────────────────
+
+function reportCrossRepoBoard(repoName: string, state: PRBoardState, round: number): void {
+  const total = state.totalOpen;
+  if (total === 0) {
+    console.log(`${DIM}📋 [${repoName}] No open PRs${RESET}`);
+    return;
+  }
+  console.log(`${BOLD}  📂 ${repoName}${RESET} — ${total} open PR(s)`);
+  if (state.drafts > 0) console.log(`    🟡 Drafts:            ${state.drafts}`);
+  if (state.changesRequested > 0) console.log(`    ⚠️  Changes requested: ${state.changesRequested}`);
+  if (state.ciFailures > 0) console.log(`    ❌ CI failures:       ${state.ciFailures}`);
+  if (state.needsReview > 0) console.log(`    🔵 Needs review:      ${state.needsReview}`);
+  if (state.readyToMerge > 0) console.log(`    🟢 Ready to merge:    ${state.readyToMerge}`);
 }
 
 // ── Core triage (always runs) ────────────────────────────────────
@@ -731,6 +861,14 @@ export async function runWatch(dest: string, options: WatchOptions | WatchConfig
     try { await execFileAsync('az', ['account', 'show']); } catch { fatal('az CLI not authenticated — run: az login'); }
   }
 
+  // Resolve cross-repo adapters for multi-repo PR monitoring
+  const crossRepoAdapters: CrossRepoAdapter[] = config.repos && config.repos.length > 0
+    ? resolveCrossRepoAdapters(config.repos, teamRoot)
+    : [];
+  if (crossRepoAdapters.length > 0) {
+    console.log(`${DIM}Cross-repo monitoring: ${crossRepoAdapters.map(r => `${r.name} [${r.adapter.type}]`).join(', ')}${RESET}`);
+  }
+
   // Parse team.md
   const content = storage.readSync(teamMd) ?? '';
   const roster = parseRoster(content);
@@ -823,9 +961,12 @@ export async function runWatch(dest: string, options: WatchOptions | WatchConfig
   if (config.execute) {
     console.log(`${DIM}Max concurrent: ${config.maxConcurrent} | Timeout: ${config.timeout}m${RESET}`);
   }
+  if (crossRepoAdapters.length > 0) {
+    console.log(`${DIM}Cross-repo: monitoring ${crossRepoAdapters.length} companion repo(s)${RESET}`);
+  }
   // Warn when fleet dispatch mode is set but the fleet-dispatch capability is not enabled
   if ((config.dispatchMode === 'fleet' || config.dispatchMode === 'hybrid') &&
-      !enabledCapabilities.some(c => c.name === 'fleet-dispatch')) {
+    !enabledCapabilities.some(c => c.name === 'fleet-dispatch')) {
     console.warn(`${YELLOW}⚠${RESET}  dispatchMode="${config.dispatchMode}" but fleet-dispatch capability is not enabled. Read-heavy issues will not be batched.`);
   }
   console.log();
@@ -968,6 +1109,25 @@ export async function runWatch(dest: string, options: WatchOptions | WatchConfig
     });
 
     reportBoard(roundState, round);
+
+    // Cross-repo PR monitoring
+    if (crossRepoAdapters.length > 0) {
+      console.log(`${BOLD}  📡 Cross-Repo PRs${RESET}`);
+      for (const crossRepo of crossRepoAdapters) {
+        try {
+          const crossPRState = await checkCrossRepoPRs(crossRepo.name, roster, crossRepo.adapter, vlog);
+          reportCrossRepoBoard(crossRepo.name, crossPRState, round);
+          // Aggregate cross-repo PR counts into the main board state
+          roundState.drafts += crossPRState.drafts;
+          roundState.needsReview += crossPRState.needsReview;
+          roundState.changesRequested += crossPRState.changesRequested;
+          roundState.ciFailures += crossPRState.ciFailures;
+          roundState.readyToMerge += crossPRState.readyToMerge;
+        } catch (e) {
+          console.log(`${YELLOW}⚠${RESET} [${crossRepo.name}] Cross-repo check failed: ${(e as Error).message}`);
+        }
+      }
+    }
 
     // Fix 1: Print next poll time
     const nextPollTime = new Date(Date.now() + interval * 60 * 1000);

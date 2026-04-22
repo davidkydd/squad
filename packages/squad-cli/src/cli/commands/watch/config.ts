@@ -12,6 +12,14 @@ const storage = new FSStorageProvider();
 /** Dispatch strategy for issue execution. */
 export type DispatchMode = 'task' | 'fleet' | 'hybrid';
 
+/** Cross-repo entry — a companion repo whose PRs the watch loop monitors. */
+export interface CrossRepoEntry {
+  /** Short display name (e.g. "prometheus-extensions"). */
+  name: string;
+  /** Filesystem path to the repo root (absolute or relative to the squad repo). */
+  path: string;
+}
+
 /** Fully-resolved watch configuration. */
 export interface WatchConfig {
   interval: number;
@@ -41,6 +49,8 @@ export interface WatchConfig {
   sentinelFile?: string;
   /** State persistence backend. */
   stateBackend?: 'worktree' | 'git-notes' | 'orphan' | 'external';
+  /** Cross-repo monitoring: list of companion repos whose PRs should be watched. */
+  repos?: CrossRepoEntry[];
 }
 
 const DEFAULTS: WatchConfig = {
@@ -99,6 +109,7 @@ export function loadWatchConfig(
     overnightEnd: cliOverrides.overnightEnd ?? fileConfig.overnightEnd,
     sentinelFile: cliOverrides.sentinelFile ?? fileConfig.sentinelFile,
     stateBackend: cliOverrides.stateBackend ?? fileConfig.stateBackend,
+    repos: cliOverrides.repos ?? fileConfig.repos,
   };
 
   return merged;
@@ -140,9 +151,22 @@ function normalizeFileConfig(raw: Record<string, unknown>): Partial<WatchConfig>
     }
   }
 
+  // Cross-repo monitoring
+  if (Array.isArray(raw['repos'])) {
+    const repos: CrossRepoEntry[] = [];
+    for (const entry of raw['repos']) {
+      if (typeof entry === 'object' && entry !== null &&
+          typeof (entry as Record<string, unknown>)['name'] === 'string' &&
+          typeof (entry as Record<string, unknown>)['path'] === 'string') {
+        repos.push({ name: (entry as Record<string, string>)['name']!, path: (entry as Record<string, string>)['path']! });
+      }
+    }
+    if (repos.length > 0) result.repos = repos;
+  }
+
   // Everything else is a capability key
   const caps: Record<string, boolean | Record<string, unknown>> = {};
-  const reserved = new Set(['interval', 'execute', 'maxConcurrent', 'timeout', 'copilotFlags', 'agentCmd', 'verbose', 'dispatchMode', 'logFile', 'authUser', 'notifyLevel', 'overnightStart', 'overnightEnd', 'sentinelFile', 'stateBackend']);
+  const reserved = new Set(['interval', 'execute', 'maxConcurrent', 'timeout', 'copilotFlags', 'agentCmd', 'verbose', 'dispatchMode', 'logFile', 'authUser', 'notifyLevel', 'overnightStart', 'overnightEnd', 'sentinelFile', 'stateBackend', 'repos']);
   for (const [key, value] of Object.entries(raw)) {
     if (reserved.has(key)) continue;
     if (typeof value === 'boolean' || (typeof value === 'object' && value !== null && !Array.isArray(value))) {
