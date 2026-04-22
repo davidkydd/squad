@@ -41,6 +41,7 @@ import type { WatchCapability, WatchContext, WatchPhase, CapabilityResult } from
 import { CapabilityRegistry } from './registry.js';
 import { createDefaultRegistry } from './capabilities/index.js';
 import { createVerboseLogger, type VerboseLogger } from './verbose.js';
+import { getAdoContext, scanRepoForCommands, processSquadCommands, loadState as loadCommandState } from './capabilities/squad-commands.js';
 
 // ── Re-exports for backward compatibility ────────────────────────
 
@@ -232,6 +233,8 @@ function emptyBoardState(): BoardState {
 
 type PRBoardState = Pick<BoardState, 'drafts' | 'needsReview' | 'changesRequested' | 'ciFailures' | 'readyToMerge'> & {
   totalOpen: number;
+  /** PR IDs for command scanning */
+  prIds?: number[];
 };
 
 async function checkPRs(roster: ReturnType<typeof parseRoster>, adapter: PlatformAdapter, vlog?: VerboseLogger): Promise<PRBoardState> {
@@ -386,6 +389,7 @@ async function checkCrossRepoPRs(
     ciFailures: ciFailureSet.size,
     readyToMerge: readyToMergeSet.size,
     totalOpen: prs.length,
+    prIds: prs.map(pr => pr.number),
   };
 }
 
@@ -1148,6 +1152,7 @@ export async function runWatch(dest: string, options: WatchOptions | WatchConfig
     reportBoard(roundState, round);
 
     // Cross-repo PR monitoring
+    const crossRepoPrData: Array<{ name: string; path: string; prIds: number[] }> = [];
     if (crossRepoAdapters.length > 0) {
       console.log(`${BOLD}  📡 Cross-Repo PRs${RESET}`);
       for (const crossRepo of crossRepoAdapters) {
@@ -1160,8 +1165,52 @@ export async function runWatch(dest: string, options: WatchOptions | WatchConfig
           roundState.changesRequested += crossPRState.changesRequested;
           roundState.ciFailures += crossPRState.ciFailures;
           roundState.readyToMerge += crossPRState.readyToMerge;
+          // Collect PR IDs for /squad command scanning
+          if (crossPRState.prIds && crossPRState.prIds.length > 0) {
+            crossRepoPrData.push({ name: crossRepo.name, path: crossRepo.path, prIds: crossPRState.prIds });
+          }
         } catch (e) {
           console.log(`${YELLOW}⚠${RESET} [${crossRepo.name}] Cross-repo check failed: ${(e as Error).message}`);
+        }
+      }
+    }
+
+    // /squad command scanning — check PR threads for /squad commands
+    if (crossRepoPrData.length > 0) {
+      const allCommands = [];
+      for (const repoData of crossRepoPrData) {
+        try {
+          const adoCtx = getAdoContext(repoData.path, repoData.name);
+          if (!adoCtx) {
+            vlog?.log(`[${repoData.name}] Could not resolve ADO context — skipping /squad scan`);
+            continue;
+          }
+          const state = loadCommandState(teamRoot);
+          const commands = await scanRepoForCommands(repoData.name, adoCtx, repoData.prIds, state);
+          allCommands.push(...commands);
+        } catch (e) {
+          vlog?.log(`[${repoData.name}] /squad command scan failed: ${(e as Error).message}`);
+        }
+      }
+      if (allCommands.length > 0) {
+        console.log(`${BOLD}  🤖 /squad Commands${RESET} — ${allCommands.length} pending`);
+        for (const cmd of allCommands) {
+          console.log(`  ${DIM}/squad ${cmd.rawCommand}${RESET} on PR #${cmd.prId} (${cmd.repoName}) by ${cmd.author}`);
+        }
+        const watchCtx: WatchContext = {
+          teamRoot,
+          adapter,
+          round,
+          roster: roster.map(r => ({ name: r.name, label: r.label, expertise: [] as string[] })),
+          config: {},
+          agentCmd: config.agentCmd,
+          copilotFlags: config.copilotFlags,
+          verbose: config.verbose,
+          pidTracker,
+        };
+        const result = await processSquadCommands(allCommands, watchCtx);
+        if (result.processed > 0) {
+          console.log(`  ✅ Processed ${result.processed} command(s): ${result.succeeded} succeeded, ${result.failed} failed`);
         }
       }
     }
