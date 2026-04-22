@@ -8,13 +8,14 @@
  * analysis tracks inside one Copilot invocation.
  */
 
-import { execSync, execFileSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { WatchCapability, WatchContext, PreflightResult, CapabilityResult } from '../types.js';
 import type { MachineCapabilities } from '@bradygaster/squad-sdk/ralph/capabilities';
 import type { DispatchMode } from '../config.js';
+import { checkPlatformCli } from './platform-preflight.js';
 import {
   type ExecutableWorkItem,
   findExecutableIssues,
@@ -58,11 +59,12 @@ function buildFleetPrompt(
   ].join('\n');
 }
 
-/** Invoke a fleet prompt via the Copilot CLI. */
+/** Invoke a fleet prompt via the agent CLI (copilot or agency). */
 function invokeFleet(
   prompt: string,
   cwd: string,
   timeoutMs: number,
+  context: WatchContext,
 ): { success: boolean; output?: string; error?: string } {
   const promptFile = join(tmpdir(), `fleet-prompt-${Date.now()}.txt`);
   writeFileSync(promptFile, prompt, 'utf-8');
@@ -71,14 +73,19 @@ function invokeFleet(
     // Read the prompt from file
     const promptContent = readFileSync(promptFile, 'utf-8');
 
-    // Use execFileSync with args array — no shell, no injection risk
-    const copilotBin = process.platform === 'win32' ? 'copilot.cmd' : 'copilot';
-    const result = execFileSync(copilotBin, [
-      '-p', promptContent,
-      '--allow-all',
-      '--no-ask-user',
-      '--autopilot',
-    ], {
+    // Use agentCmd override, or default based on platform
+    let cmd: string;
+    let args: string[];
+    if (context.agentCmd) {
+      const parts = context.agentCmd.trim().split(/\s+/);
+      cmd = parts[0]!;
+      args = [...parts.slice(1), '-p', promptContent, '--allow-all', '--no-ask-user', '--autopilot'];
+    } else {
+      cmd = process.platform === 'win32' ? 'copilot.cmd' : 'copilot';
+      args = ['-p', promptContent, '--allow-all', '--no-ask-user', '--autopilot'];
+    }
+
+    const result = execFileSync(cmd, args, {
       cwd,
       timeout: timeoutMs,
       encoding: 'utf-8' as BufferEncoding,
@@ -98,19 +105,13 @@ function invokeFleet(
 
 export class FleetDispatchCapability implements WatchCapability {
   readonly name = 'fleet-dispatch';
-  readonly description = 'Batch read-heavy issues into a parallel /fleet Copilot session';
+  readonly description = 'Batch read-heavy issues into a parallel /fleet agent session';
   readonly configShape = 'boolean' as const;
-  readonly requires = ['gh', 'copilot'];
+  readonly requires = ['gh or az'];
   readonly phase = 'post-execute' as const;
 
-  async preflight(_context: WatchContext): Promise<PreflightResult> {
-    // Fleet dispatch requires the copilot CLI — quick sanity check
-    try {
-      execSync('copilot --version', { encoding: 'utf-8', stdio: 'pipe' });
-      return { ok: true };
-    } catch {
-      return { ok: false, reason: 'copilot CLI not found — required for fleet dispatch' };
-    }
+  async preflight(context: WatchContext): Promise<PreflightResult> {
+    return checkPlatformCli(context);
   }
 
   async execute(context: WatchContext): Promise<CapabilityResult> {
@@ -151,7 +152,7 @@ export class FleetDispatchCapability implements WatchCapability {
       // Build and invoke fleet prompt
       const prompt = buildFleetPrompt(readIssues, context.roster);
       const fleetTimeout = Math.max(timeoutMs, 300_000); // at least 5 min for fleet
-      const result = invokeFleet(prompt, context.teamRoot, fleetTimeout);
+      const result = invokeFleet(prompt, context.teamRoot, fleetTimeout, context);
 
       if (result.success) {
         return {

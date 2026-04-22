@@ -8,6 +8,7 @@ import path from 'node:path';
 import type { WatchCapability, WatchContext, PreflightResult, CapabilityResult } from '../types.js';
 import type { MachineCapabilities } from '@bradygaster/squad-sdk/ralph/capabilities';
 import { createVerboseLogger } from '../verbose.js';
+import { checkPlatformCli } from './platform-preflight.js';
 
 /** Normalized work item for execution. */
 export interface ExecutableWorkItem {
@@ -45,7 +46,11 @@ export function classifyIssue(title: string): 'read' | 'write' {
   return 'write'; // default to write (safer — gets full agent session)
 }
 
-/** Build agent command for a prompt. */
+/** Build agent command for a prompt.
+ * Supports --agent-cmd override (e.g., 'agency copilot' for ADO).
+ * Falls back to 'copilot' for GitHub repos.
+ * For ADO repos without --agent-cmd, warns and falls back to 'copilot'.
+ */
 function buildAgentCommand(
   prompt: string,
   context: WatchContext,
@@ -183,17 +188,14 @@ async function executeAll(
 
 export class ExecuteCapability implements WatchCapability {
   readonly name = 'execute';
-  readonly description = 'Spawn Copilot sessions to work on eligible issues';
+  readonly description = 'Spawn agent sessions to work on eligible issues';
   readonly configShape = 'boolean' as const;
-  readonly requires = ['gh'];
+  readonly requires = ['gh or az'];
   readonly phase = 'post-execute' as const;
 
-  async preflight(_context: WatchContext): Promise<PreflightResult> {
-    return new Promise<PreflightResult>((resolve) => {
-      execFile('gh', ['--version'], (err) => {
-        resolve(err ? { ok: false, reason: 'gh CLI not found' } : { ok: true });
-      });
-    });
+  async preflight(context: WatchContext): Promise<PreflightResult> {
+    // Platform-aware check: az for ADO, gh for GitHub
+    return checkPlatformCli(context);
   }
 
   async execute(context: WatchContext): Promise<CapabilityResult> {

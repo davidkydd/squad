@@ -36,7 +36,7 @@ export class DecisionHygieneCapability implements WatchCapability {
   readonly name = 'decision-hygiene';
   readonly description = 'Auto-merge decision inbox when >5 files accumulate';
   readonly configShape = 'boolean' as const;
-  readonly requires = ['gh'];
+  readonly requires = [];
   readonly phase = 'housekeeping' as const;
 
   async preflight(context: WatchContext): Promise<PreflightResult> {

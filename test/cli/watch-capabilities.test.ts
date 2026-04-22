@@ -118,7 +118,7 @@ describe('Watch Capabilities', () => {
       const cap = new ExecuteCapability();
       expect(cap.name).toBe('execute');
       expect(cap.phase).toBe('post-execute');
-      expect(cap.requires).toContain('gh');
+      expect(cap.requires).toContain('gh or az');
       expect(cap.configShape).toBe('boolean');
       expect(cap.description).toBeTruthy();
     });
@@ -127,7 +127,7 @@ describe('Watch Capabilities', () => {
       const cap = new BoardCapability();
       expect(cap.name).toBe('board');
       expect(cap.phase).toBe('post-execute');
-      expect(cap.requires).toContain('gh');
+      expect(cap.requires).toContain('gh or az');
       expect(cap.configShape).toBe('object');
     });
 
@@ -143,7 +143,7 @@ describe('Watch Capabilities', () => {
       const cap = new DecisionHygieneCapability();
       expect(cap.name).toBe('decision-hygiene');
       expect(cap.phase).toBe('housekeeping');
-      expect(cap.requires).toContain('gh');
+      expect(cap.requires).toEqual([]);
       expect(cap.configShape).toBe('boolean');
     });
 

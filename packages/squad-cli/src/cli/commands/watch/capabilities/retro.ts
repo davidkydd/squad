@@ -36,7 +36,7 @@ export class RetroCapability implements WatchCapability {
   readonly name = 'retro';
   readonly description = 'Enforce retrospective checks (Fridays or when missed >7 days)';
   readonly configShape = 'boolean' as const;
-  readonly requires = ['gh'];
+  readonly requires = [];
   readonly phase = 'housekeeping' as const;
 
   async preflight(_context: WatchContext): Promise<PreflightResult> {
@@ -76,7 +76,7 @@ export class RetroCapability implements WatchCapability {
       const dateSlug = now.toISOString().slice(0, 10);
       const prompt =
         `Run a sprint retrospective for the squad. ` +
-        `Review recent GitHub activity (issues closed, PRs merged, CI status). ` +
+        `Review recent activity (work items closed, PRs merged, CI status). ` +
         `Summarize: what went well, what didn't, action items. ` +
         `Write the output to .squad/log/${dateSlug}-retrospective.md`;
 

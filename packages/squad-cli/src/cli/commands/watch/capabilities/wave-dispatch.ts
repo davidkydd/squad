@@ -70,7 +70,7 @@ export class WaveDispatchCapability implements WatchCapability {
   readonly name = 'wave-dispatch';
   readonly description = 'Wave-based parallel sub-task dispatch within issues';
   readonly configShape = 'boolean' as const;
-  readonly requires = ['gh'];
+  readonly requires = [];
   readonly phase = 'post-execute' as const;
 
   async preflight(_context: WatchContext): Promise<PreflightResult> {
