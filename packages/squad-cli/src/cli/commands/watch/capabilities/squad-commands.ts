@@ -508,9 +508,10 @@ export async function processSquadCommands(
       const result = await executeSquadCommand(cmd, context, timeoutMs);
 
       if (result.success) {
-        // Post result to the thread
-        const resultMessage = result.output
-          ? `✅ **Squad completed:** \`/squad ${cmd.commandName}\`\n\n${truncateForComment(result.output)}`
+        // Post result to the thread — extract just the final summary, not verbose tool logs
+        const summary = result.output ? extractSummary(result.output) : '';
+        const resultMessage = summary
+          ? `✅ **Squad completed:** \`/squad ${cmd.commandName}\`\n\n${truncateForComment(summary)}`
           : `✅ **Squad completed:** \`/squad ${cmd.commandName}\`\n\n_Completed successfully._`;
 
         try {
@@ -522,8 +523,9 @@ export async function processSquadCommands(
         markCommandCompleted(cmd, `Completed by squad`);
         succeeded++;
       } else {
-        // Post failure to the thread
-        const errorMessage = `❌ **Squad failed:** \`/squad ${cmd.commandName}\`\n\n${result.error ?? 'Unknown error'}\n\n${result.output ? truncateForComment(result.output) : ''}`;
+        // Post failure to the thread — extract summary from output if available
+        const failSummary = result.output ? extractSummary(result.output) : '';
+        const errorMessage = `❌ **Squad failed:** \`/squad ${cmd.commandName}\`\n\n${result.error ?? 'Unknown error'}${failSummary ? '\n\n' + truncateForComment(failSummary) : ''}`;
 
         try {
           replyToThread(cmd.adoContext, cmd.prId, cmd.threadId, errorMessage);
@@ -564,6 +566,51 @@ export async function processSquadCommands(
  * Truncate long output for PR comments (ADO has a ~150K char limit but
  * we want to keep things readable).
  */
+/**
+ * Extract the final summary from agent output, stripping verbose tool-call logs.
+ *
+ * Agent output typically looks like:
+ *   ● command1 (shell)          ← tool-call log lines
+ *   │ ...                       ← indented output
+ *   └ ...
+ *   ✗ command2 (shell)          ← failed tool call
+ *   │ ...
+ *   └ Permission denied...
+ *   <blank line(s)>
+ *   Review complete. TL;DR...   ← final summary (what we want)
+ *
+ * Strategy: walk backwards from end, collect lines until we hit a tool-call
+ * log marker (●, ✗, │, └, ├) or the output is exhausted.
+ */
+export function extractSummary(raw: string): string {
+  const lines = raw.split('\n');
+  const toolCallPattern = /^[●✗✓│└├⎿]/;
+  const toolHeaderPattern = /^\s*(●|✗|✓)\s+.+\(shell\)/;
+  const lineCountPattern = /^└\s+\d+\s+lines?\.{3}/;
+
+  // Walk backwards to find where the final plain-text block starts
+  let summaryStart = lines.length;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const trimmed = lines[i]!.trim();
+    if (trimmed === '') {
+      // blank line — could be separator between tool output and summary
+      continue;
+    }
+    if (toolCallPattern.test(trimmed) || toolHeaderPattern.test(trimmed) || lineCountPattern.test(trimmed)) {
+      // Hit a tool-call log line — summary starts after this
+      summaryStart = i + 1;
+      break;
+    }
+    // This is a summary line — keep walking backwards
+  }
+
+  // If we walked all the way back, everything is summary (no tool markers found)
+  if (summaryStart >= lines.length) summaryStart = 0;
+
+  const summary = lines.slice(summaryStart).join('\n').trim();
+  return summary || raw.trim(); // fallback to full output if extraction yields nothing
+}
+
 function truncateForComment(text: string, maxLength: number = 8000): string {
   if (text.length <= maxLength) return text;
   return text.slice(0, maxLength) + '\n\n_... (truncated — full output was ' + text.length + ' characters)_';

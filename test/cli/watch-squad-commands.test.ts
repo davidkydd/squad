@@ -3,6 +3,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { findSquadCommands, type PullRequestThread, type AdoContext } from '../../packages/squad-cli/src/cli/commands/watch/capabilities/ado-pr-threads.js';
+import { extractSummary } from '../../packages/squad-cli/src/cli/commands/watch/capabilities/squad-commands.js';
 
 const mockAdoCtx: AdoContext = {
   org: 'msazure',
@@ -122,5 +123,84 @@ describe('/squad command parsing', () => {
     expect(cmds).toHaveLength(1);
     expect(cmds[0]!.commandName).toBe('review');
     expect(cmds[0]!.commandArgs).toBe('with extra spaces');
+  });
+});
+
+describe('extractSummary', () => {
+  it('extracts final text after tool-call logs', () => {
+    const raw = `● Check sample_limit values (shell)
+│ grep -n 'sample_limit' config/prometheus.yml | head -20
+└ 21 lines...
+
+● Check alerting rules (shell)
+│ grep -A3 'SampleLimitExceeded' config/alerting_rules.yml
+└ 18 lines...
+
+Review complete. TL;DR: No critical issues found — recommend approve.`;
+
+    expect(extractSummary(raw)).toBe(
+      'Review complete. TL;DR: No critical issues found — recommend approve.',
+    );
+  });
+
+  it('extracts multi-line summary after tool logs', () => {
+    const raw = `● Some command (shell)
+│ output
+└ 3 lines...
+
+This is the summary.
+It spans multiple lines.
+With some detail.`;
+
+    expect(extractSummary(raw)).toBe(
+      'This is the summary.\nIt spans multiple lines.\nWith some detail.',
+    );
+  });
+
+  it('returns full text when no tool-call markers present', () => {
+    const raw = 'Just a plain summary with no tool logs.';
+    expect(extractSummary(raw)).toBe('Just a plain summary with no tool logs.');
+  });
+
+  it('handles failed tool calls (✗ marker)', () => {
+    const raw = `✗ Check az CLI (shell)
+│ which az
+└ Permission denied
+
+✗ Get PR details (shell)
+│ az repos pr show --id 123
+└ Permission denied
+
+● Fallback approach (shell)
+│ git log --oneline -5
+└ 6 lines...
+
+Could not access ADO API. Reviewed via git history instead.`;
+
+    expect(extractSummary(raw)).toBe(
+      'Could not access ADO API. Reviewed via git history instead.',
+    );
+  });
+
+  it('returns full output when everything is summary', () => {
+    const raw = `All tests pass.
+No issues found.
+Recommend merge.`;
+
+    expect(extractSummary(raw)).toBe('All tests pass.\nNo issues found.\nRecommend merge.');
+  });
+
+  it('handles empty input', () => {
+    expect(extractSummary('')).toBe('');
+  });
+
+  it('handles output that is only tool logs with no summary', () => {
+    const raw = `● command1 (shell)
+│ output
+└ 3 lines...`;
+
+    // Falls back to full output since there's nothing after the tool logs
+    const result = extractSummary(raw);
+    expect(result).toBeTruthy();
   });
 });
