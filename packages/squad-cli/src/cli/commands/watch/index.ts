@@ -1186,7 +1186,7 @@ export async function runWatch(dest: string, options: WatchOptions | WatchConfig
             continue;
           }
           const state = loadCommandState(teamRoot);
-          const commands = await scanRepoForCommands(repoData.name, adoCtx, repoData.prIds, state);
+          const commands = await scanRepoForCommands(repoData.name, adoCtx, repoData.prIds, state, repoData.path);
           allCommands.push(...commands);
         } catch (e) {
           vlog?.log(`[${repoData.name}] /squad command scan failed: ${(e as Error).message}`);

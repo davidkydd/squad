@@ -242,6 +242,55 @@ function buildPromptForCommand(cmd: SquadCommand): string {
   }
 }
 
+// ── Skills Loader ────────────────────────────────────────────────
+
+/**
+ * Load .squad/skills/ markdown files from a directory.
+ * Returns a formatted string with skill contents, or empty string if none found.
+ */
+function loadSkillsFromDir(dir: string, label: string): string {
+  const skillsDir = path.join(dir, '.squad', 'skills');
+  if (!existsSync(skillsDir)) return '';
+
+  const { readdirSync } = require('node:fs') as typeof import('node:fs');
+  const files = readdirSync(skillsDir).filter((f: string) => f.endsWith('.md'));
+  if (files.length === 0) return '';
+
+  const sections: string[] = [`\n## ${label} Skills\n`];
+  for (const file of files) {
+    try {
+      const content = readFileSync(path.join(skillsDir, file), 'utf-8');
+      sections.push(`### ${file}\n\`\`\`\n${content}\n\`\`\`\n`);
+    } catch {
+      // Skip unreadable files
+    }
+  }
+  return sections.join('\n');
+}
+
+/**
+ * Build a skills context block for the agent prompt.
+ * Loads skills from:
+ *  1. The orchestrator squad (context.teamRoot) — cross-cutting skills
+ *  2. The downstream repo (cmd.repoPath) — repo-specific skills
+ */
+function buildSkillsContext(context: WatchContext, cmd: SquadCommand): string {
+  const parts: string[] = [];
+
+  // Orchestrator skills (o11y-squad or whichever squad is coordinating)
+  const orchestratorSkills = loadSkillsFromDir(context.teamRoot, 'Orchestrator');
+  if (orchestratorSkills) parts.push(orchestratorSkills);
+
+  // Downstream repo skills (if executing in a different repo)
+  if (cmd.repoPath && cmd.repoPath !== context.teamRoot) {
+    const downstreamSkills = loadSkillsFromDir(cmd.repoPath, `${cmd.repoName} Repo`);
+    if (downstreamSkills) parts.push(downstreamSkills);
+  }
+
+  if (parts.length === 0) return '';
+  return '\n\n# Available Skills Reference\n' + parts.join('\n');
+}
+
 // ── Command Execution ────────────────────────────────────────────
 
 /**
@@ -271,9 +320,14 @@ async function executeSquadCommand(
     // Non-fatal
   }
 
-  // Step 3: Build and dispatch agent
-  const prompt = buildPromptForCommand(cmd);
+  // Step 3: Build and dispatch agent — inject skills and use downstream repo cwd
+  const basePrompt = buildPromptForCommand(cmd);
+  const skillsContext = buildSkillsContext(context, cmd);
+  const prompt = skillsContext ? basePrompt + skillsContext : basePrompt;
   const { cmd: agentCmd, args } = buildAgentCommand(prompt, context);
+
+  // Use downstream repo path as cwd when available, otherwise fall back to orchestrator
+  const executionCwd = cmd.repoPath ?? context.teamRoot;
 
   return new Promise<{ success: boolean; output?: string; error?: string }>((resolve) => {
     let stdout = '';
@@ -282,7 +336,7 @@ async function executeSquadCommand(
     const cp: ChildProcess = execFile(
       agentCmd,
       args,
-      { cwd: context.teamRoot, timeout: timeoutMs, maxBuffer: 50 * 1024 * 1024 },
+      { cwd: executionCwd, timeout: timeoutMs, maxBuffer: 50 * 1024 * 1024 },
       (err) => {
         if (err) {
           const execErr = err as Error & { killed?: boolean };
@@ -364,12 +418,14 @@ export function getAdoContext(repoPath: string, repoName: string): AdoContext | 
 
 /**
  * Scan a single cross-repo for /squad commands on all open PRs.
+ * @param repoPath Resolved filesystem path to the downstream repo (for cwd during execution)
  */
 export async function scanRepoForCommands(
   repoName: string,
   adoCtx: AdoContext,
   prIds: number[],
   state: CommandState,
+  repoPath?: string,
 ): Promise<SquadCommand[]> {
   const allCommands: SquadCommand[] = [];
 
@@ -377,6 +433,13 @@ export async function scanRepoForCommands(
     try {
       const threads = listPrThreads(adoCtx, prId);
       const commands = findSquadCommands(threads, prId, repoName, adoCtx);
+
+      // Attach the downstream repo path so agents execute in the right cwd
+      if (repoPath) {
+        for (const cmd of commands) {
+          cmd.repoPath = repoPath;
+        }
+      }
 
       // Filter out already-processed commands
       const newCommands = commands.filter(

@@ -65,6 +65,8 @@ export interface SquadCommand {
   repoName: string;
   /** Full ADO context needed for API calls */
   adoContext: AdoContext;
+  /** Resolved filesystem path to the downstream repo (for cwd during execution) */
+  repoPath?: string;
 }
 
 export interface AdoContext {
