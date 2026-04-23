@@ -23,6 +23,7 @@ import {
   type AdoContext,
   type SquadCommand,
   type PullRequestThread,
+  type PrDetails,
   getRepoId,
   listPrThreads,
   findSquadCommands,
@@ -32,6 +33,7 @@ import {
   postCheckpoint,
   replyToThread,
   isKnownCommand,
+  getPrDetails,
 } from './ado-pr-threads.js';
 
 const IS_WINDOWS = process.platform === 'win32';
@@ -112,38 +114,96 @@ function buildAgentCommand(
  * Build the agent prompt for a /squad review command.
  */
 function buildReviewPrompt(cmd: SquadCommand): string {
-  return [
+  const pr = cmd.prDetails;
+  const lines: string[] = [
     `You are reviewing PR #${cmd.prId} in the ${cmd.repoName} repository.`,
     `Requested by: ${cmd.author}`,
-    '',
-    'TASK: Perform a thorough code review of this PR.',
-    '',
-    'Steps:',
-    `1. Run: az repos pr show --id ${cmd.prId} --org https://dev.azure.com/${cmd.adoContext.org} --project ${cmd.adoContext.project} --output json`,
-    '2. Get the diff and review the changes critically',
-    '3. Focus on: bugs, security issues, performance, thread safety (for Go), error handling',
-    '4. For each issue: explain the problem, show the scenario, suggest a fix with file/line references',
-    '5. Be critical but fair — ignore style nits, focus on real problems',
+  ];
+
+  if (pr) {
+    const srcBranch = pr.sourceRefName.replace('refs/heads/', '');
+    const tgtBranch = pr.targetRefName.replace('refs/heads/', '');
+    lines.push(
+      '',
+      '## PR Details',
+      `- **Title:** ${pr.title}`,
+      `- **Author:** ${pr.createdBy}`,
+      `- **Source branch:** ${srcBranch}`,
+      `- **Target branch:** ${tgtBranch}`,
+      pr.description ? `- **Description:** ${pr.description.slice(0, 500)}` : '',
+      '',
+      'TASK: Perform a thorough code review of this PR.',
+      '',
+      'Steps:',
+      `1. Fetch the PR branch and get the diff:`,
+      `   git fetch origin ${pr.sourceRefName}:refs/remotes/origin/${srcBranch} 2>/dev/null || true`,
+      `   git fetch origin ${pr.targetRefName}:refs/remotes/origin/${tgtBranch} 2>/dev/null || true`,
+      `   git --no-pager diff origin/${tgtBranch}...origin/${srcBranch}`,
+      `   IMPORTANT: Always diff origin/${tgtBranch}...origin/${srcBranch} — never use HEAD or local branches.`,
+      '2. Review the changes critically',
+      '3. Focus on: bugs, security issues, performance, thread safety (for Go), error handling',
+      '4. For each issue: explain the problem, show the scenario, suggest a fix with file/line references',
+      '5. Be critical but fair — ignore style nits, focus on real problems',
+    );
+  } else {
+    // Fallback if PR details couldn't be fetched
+    lines.push(
+      '',
+      'TASK: Perform a thorough code review of this PR.',
+      '',
+      'Steps:',
+      `1. Run: az repos pr show --id ${cmd.prId} --org https://dev.azure.com/${cmd.adoContext.org} --project ${cmd.adoContext.project} --output json`,
+      '   Parse the sourceRefName and targetRefName from the output.',
+      '   Then diff those branches: git --no-pager diff origin/{targetBranch}...origin/{sourceBranch}',
+      '   IMPORTANT: Never use HEAD or local branches — always diff the PR source against target.',
+      '2. Review the changes critically',
+      '3. Focus on: bugs, security issues, performance, thread safety (for Go), error handling',
+      '4. For each issue: explain the problem, show the scenario, suggest a fix with file/line references',
+      '5. Be critical but fair — ignore style nits, focus on real problems',
+    );
+  }
+
+  lines.push(
     '',
     'OUTPUT: Write your review as a structured markdown report.',
     'Include: ## Summary, ## Critical Issues, ## Suggestions, ## Overall Assessment',
     `Print the full report to stdout so it can be posted to the PR.`,
     cmd.commandArgs ? `\nAdditional instructions: ${cmd.commandArgs}` : '',
-  ].join('\n');
+  );
+
+  return lines.join('\n');
 }
 
 /**
  * Build the agent prompt for a /squad babysit command.
  */
 function buildBabysitPrompt(cmd: SquadCommand): string {
-  return [
+  const pr = cmd.prDetails;
+  const lines: string[] = [
     `You are babysitting PR #${cmd.prId} in the ${cmd.repoName} repository until it is merge-ready.`,
     `Requested by: ${cmd.author}`,
+  ];
+
+  if (pr) {
+    const srcBranch = pr.sourceRefName.replace('refs/heads/', '');
+    const tgtBranch = pr.targetRefName.replace('refs/heads/', '');
+    lines.push(
+      '',
+      '## PR Details',
+      `- **Title:** ${pr.title}`,
+      `- **Author:** ${pr.createdBy}`,
+      `- **Source branch:** ${srcBranch}`,
+      `- **Target branch:** ${tgtBranch}`,
+      `- **Status:** ${pr.status}`,
+    );
+  }
+
+  lines.push(
     '',
     'TASK: Perform one babysit cycle on this PR. This is NOT continuous monitoring — just one pass.',
     '',
     'Steps:',
-    `1. Get PR status: az repos pr show --id ${cmd.prId} --org https://dev.azure.com/${cmd.adoContext.org} --project ${cmd.adoContext.project} --output json`,
+    `1. Get PR policy status: az repos pr policy list --id ${cmd.prId} --org https://dev.azure.com/${cmd.adoContext.org} --project ${cmd.adoContext.project} --output json`,
     '2. Check all policy evaluations (build gates, reviewer requirements, comment threads)',
     '3. Identify and trigger any untriggered required builds',
     '4. Check for flaky builds (>50% failure across recent builds = repo-wide flake, skip retry)',
@@ -154,21 +214,40 @@ function buildBabysitPrompt(cmd: SquadCommand): string {
     'OUTPUT: Write a status report in markdown format.',
     'Include: ## Policy Status, ## Builds, ## Open Comments, ## Blocking Items, ## Next Steps',
     cmd.commandArgs ? `\nAdditional instructions: ${cmd.commandArgs}` : '',
-  ].join('\n');
+  );
+
+  return lines.join('\n');
 }
 
 /**
  * Build the agent prompt for a /squad bump command.
  */
 function buildBumpPrompt(cmd: SquadCommand): string {
-  return [
+  const pr = cmd.prDetails;
+  const lines: string[] = [
     `You are bumping PR #${cmd.prId} in the ${cmd.repoName} repository to unblock merge.`,
     `Requested by: ${cmd.author}`,
+  ];
+
+  if (pr) {
+    const srcBranch = pr.sourceRefName.replace('refs/heads/', '');
+    const tgtBranch = pr.targetRefName.replace('refs/heads/', '');
+    lines.push(
+      '',
+      '## PR Details',
+      `- **Title:** ${pr.title}`,
+      `- **Source branch:** ${srcBranch}`,
+      `- **Target branch:** ${tgtBranch}`,
+      `- **Status:** ${pr.status}`,
+    );
+  }
+
+  lines.push(
     '',
     'TASK: Perform a one-shot bump — diagnose and resolve blockers.',
     '',
     'Steps:',
-    `1. Get PR status: az repos pr show --id ${cmd.prId} --org https://dev.azure.com/${cmd.adoContext.org} --project ${cmd.adoContext.project} --output json`,
+    `1. Get PR policy status: az repos pr policy list --id ${cmd.prId} --org https://dev.azure.com/${cmd.adoContext.org} --project ${cmd.adoContext.project} --output json`,
     '2. Diagnose failed gates (build failures, expired checks)',
     '3. Re-queue expired/broken policy evaluations',
     '4. Check for merge conflicts',
@@ -176,7 +255,9 @@ function buildBumpPrompt(cmd: SquadCommand): string {
     '',
     'OUTPUT: Brief status report of actions taken and remaining blockers.',
     cmd.commandArgs ? `\nAdditional instructions: ${cmd.commandArgs}` : '',
-  ].join('\n');
+  );
+
+  return lines.join('\n');
 }
 
 /**
@@ -319,7 +400,17 @@ async function executeSquadCommand(
     // Non-fatal
   }
 
-  // Step 3: Build and dispatch agent — inject skills and use downstream repo cwd
+  // Step 3: Enrich with PR details (branch refs, title, description)
+  if (!cmd.prDetails) {
+    try {
+      const details = getPrDetails(cmd.adoContext, cmd.prId);
+      if (details) cmd.prDetails = details;
+    } catch (e) {
+      console.log(`  ⚠️ Could not enrich PR details: ${(e as Error).message}`);
+    }
+  }
+
+  // Step 4: Build and dispatch agent — inject skills and use downstream repo cwd
   const basePrompt = buildPromptForCommand(cmd);
   const skillsContext = buildSkillsContext(context, cmd);
   const prompt = skillsContext ? basePrompt + skillsContext : basePrompt;

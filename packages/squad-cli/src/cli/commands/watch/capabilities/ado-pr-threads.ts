@@ -67,6 +67,18 @@ export interface SquadCommand {
   adoContext: AdoContext;
   /** Resolved filesystem path to the downstream repo (for cwd during execution) */
   repoPath?: string;
+  /** PR metadata fetched from ADO API (enriched before execution) */
+  prDetails?: PrDetails;
+}
+
+export interface PrDetails {
+  title: string;
+  description: string;
+  sourceRefName: string;  // e.g. "refs/heads/feature-branch"
+  targetRefName: string;  // e.g. "refs/heads/master"
+  status: string;
+  createdBy: string;
+  url: string;
 }
 
 export interface AdoContext {
@@ -190,6 +202,40 @@ export function createThread(
     status: status === 'active' ? 1 : status === 'closed' ? 4 : 1,
   };
   return adoPost<PullRequestThread>(url, body);
+}
+
+// ── PR Details ──────────────────────────────────────────────────
+
+/**
+ * Fetch PR metadata from ADO REST API.
+ * Used to enrich SquadCommand with source/target branches, title, description
+ * so agents don't need to figure out which branch to diff.
+ */
+export function getPrDetails(ctx: AdoContext, prId: number): PrDetails | null {
+  try {
+    const url = `https://dev.azure.com/${ctx.org}/${ctx.project}/_apis/git/repositories/${ctx.repoId}/pullRequests/${prId}?api-version=7.1`;
+    const pr = adoGet<{
+      title: string;
+      description: string;
+      sourceRefName: string;
+      targetRefName: string;
+      status: string;
+      createdBy: { displayName: string };
+      url: string;
+    }>(url);
+    return {
+      title: pr.title ?? '',
+      description: pr.description ?? '',
+      sourceRefName: pr.sourceRefName ?? '',
+      targetRefName: pr.targetRefName ?? '',
+      status: pr.status ?? 'unknown',
+      createdBy: pr.createdBy?.displayName ?? 'unknown',
+      url: pr.url ?? '',
+    };
+  } catch (e) {
+    console.log(`  ⚠️ Could not fetch PR #${prId} details: ${(e as Error).message}`);
+    return null;
+  }
 }
 
 // ── /squad Command Parsing ───────────────────────────────────────
