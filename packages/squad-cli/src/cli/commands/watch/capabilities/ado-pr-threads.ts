@@ -204,6 +204,53 @@ export function createThread(
   return adoPost<PullRequestThread>(url, body);
 }
 
+/**
+ * Create an inline comment thread on a specific file and line range in a PR.
+ * Used to post review findings at the exact location they apply to.
+ *
+ * The threadContext positions the comment on the "right" (new/source) side of the diff.
+ * Status 1 = active (open for discussion), 4 = closed.
+ */
+export function createInlineThread(
+  ctx: AdoContext,
+  prId: number,
+  content: string,
+  filePath: string,
+  startLine: number,
+  endLine?: number,
+  status: 'active' | 'closed' = 'active',
+): PullRequestThread {
+  const url = `https://dev.azure.com/${ctx.org}/${ctx.project}/_apis/git/repositories/${ctx.repoId}/pullRequests/${prId}/threads?api-version=7.1`;
+  const body = {
+    comments: [{ content, commentType: 1, parentCommentId: 0 }],
+    status: status === 'active' ? 1 : 4,
+    threadContext: {
+      filePath: filePath.startsWith('/') ? filePath : `/${filePath}`,
+      rightFileStart: { line: startLine, offset: 1 },
+      rightFileEnd: { line: endLine ?? startLine, offset: 1 },
+    },
+  };
+  return adoPost<PullRequestThread>(url, body);
+}
+
+/**
+ * Get the latest iteration ID for a PR.
+ * Iterations represent push updates; the latest iteration is needed to
+ * position inline comments on the current version of the diff.
+ */
+export function getLatestIterationId(ctx: AdoContext, prId: number): number | null {
+  try {
+    const url = `https://dev.azure.com/${ctx.org}/${ctx.project}/_apis/git/repositories/${ctx.repoId}/pullRequests/${prId}/iterations?api-version=7.1`;
+    const result = adoGet<{ value: Array<{ id: number }> }>(url);
+    const iterations = result.value ?? [];
+    if (iterations.length === 0) return null;
+    return iterations[iterations.length - 1]!.id;
+  } catch (e) {
+    console.log(`  ⚠️ Could not fetch PR iterations: ${(e as Error).message}`);
+    return null;
+  }
+}
+
 // ── PR Details ──────────────────────────────────────────────────
 
 /**

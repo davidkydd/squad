@@ -34,6 +34,7 @@ import {
   replyToThread,
   isKnownCommand,
   getPrDetails,
+  createInlineThread,
 } from './ado-pr-threads.js';
 
 const IS_WINDOWS = process.platform === 'win32';
@@ -142,11 +143,10 @@ function buildReviewPrompt(cmd: SquadCommand): string {
       `   IMPORTANT: Always diff origin/${tgtBranch}...origin/${srcBranch} — never use HEAD or local branches.`,
       '2. Review the changes critically',
       '3. Focus on: bugs, security issues, performance, thread safety (for Go), error handling',
-      '4. For each issue: explain the problem, show the scenario, suggest a fix with file/line references',
+      '4. For each issue found, note the exact file path (relative to repo root) and line number in the NEW (source) side of the diff',
       '5. Be critical but fair — ignore style nits, focus on real problems',
     );
   } else {
-    // Fallback if PR details couldn't be fetched
     lines.push(
       '',
       'TASK: Perform a thorough code review of this PR.',
@@ -158,16 +158,42 @@ function buildReviewPrompt(cmd: SquadCommand): string {
       '   IMPORTANT: Never use HEAD or local branches — always diff the PR source against target.',
       '2. Review the changes critically',
       '3. Focus on: bugs, security issues, performance, thread safety (for Go), error handling',
-      '4. For each issue: explain the problem, show the scenario, suggest a fix with file/line references',
+      '4. For each issue found, note the exact file path (relative to repo root) and line number in the NEW (source) side of the diff',
       '5. Be critical but fair — ignore style nits, focus on real problems',
     );
   }
 
   lines.push(
     '',
-    'OUTPUT: Write your review as a structured markdown report.',
-    'Include: ## Summary, ## Critical Issues, ## Suggestions, ## Overall Assessment',
-    `Print the full report to stdout so it can be posted to the PR.`,
+    '## OUTPUT FORMAT',
+    '',
+    'You MUST output TWO sections:',
+    '',
+    '### Section 1: Inline Findings (structured JSON)',
+    'Emit a JSON array of findings between these exact markers.',
+    'Each finding will be posted as an inline comment on the specific file/line in the PR.',
+    'Line numbers MUST refer to line numbers in the SOURCE (new) side of the diff.',
+    'The "file" field must be the path relative to the repo root (e.g., "src/main.go", not "/src/main.go").',
+    '',
+    '<!-- REVIEW_FINDINGS_START -->',
+    '[',
+    '  {',
+    '    "file": "path/to/file.go",',
+    '    "line": 42,',
+    '    "endLine": 45,',
+    '    "severity": "warning",',
+    '    "title": "Potential nil pointer dereference",',
+    '    "comment": "The `err` variable is not checked before accessing `result.Value`. If `DoSomething()` returns an error, this will panic.\\n\\nSuggested fix:\\n```go\\nif err != nil {\\n    return err\\n}\\n```"',
+    '  }',
+    ']',
+    '<!-- REVIEW_FINDINGS_END -->',
+    '',
+    'Severity levels: "critical" (bugs, security), "warning" (likely problems), "suggestion" (improvements), "nitpick" (minor style — use sparingly)',
+    'If no issues found, output an empty array: `[]`',
+    '',
+    '### Section 2: Summary',
+    'After the findings block, write a brief overall assessment as plain text.',
+    'Include: a one-line TL;DR, overall recommendation (approve/request changes), and any repo-wide observations.',
     cmd.commandArgs ? `\nAdditional instructions: ${cmd.commandArgs}` : '',
   );
 
@@ -599,16 +625,54 @@ export async function processSquadCommands(
       const result = await executeSquadCommand(cmd, context, timeoutMs);
 
       if (result.success) {
-        // Post result to the thread — extract just the final summary, not verbose tool logs
-        const summary = result.output ? extractSummary(result.output) : '';
-        const resultMessage = summary
-          ? `✅ **Squad completed:** \`/squad ${cmd.commandName}\`\n\n${truncateForComment(summary)}`
-          : `✅ **Squad completed:** \`/squad ${cmd.commandName}\`\n\n_Completed successfully._`;
+        // For review commands: parse structured findings and post inline comments
+        if (cmd.commandName === 'review' && result.output) {
+          const findings = parseReviewFindings(result.output);
+          if (findings.length > 0) {
+            let posted = 0;
+            for (const finding of findings) {
+              try {
+                const emoji = SEVERITY_EMOJI[finding.severity] ?? '💡';
+                const header = finding.title ? `**${emoji} ${finding.title}**\n\n` : `${emoji} `;
+                const body = `${header}${finding.comment}`;
+                createInlineThread(
+                  cmd.adoContext, cmd.prId, body,
+                  finding.file, finding.line, finding.endLine, 'active',
+                );
+                posted++;
+              } catch (e) {
+                console.log(`  ⚠️ Could not post inline comment on ${finding.file}:${finding.line}: ${(e as Error).message?.slice(0, 80)}`);
+              }
+            }
+            console.log(`  📝 Posted ${posted}/${findings.length} inline review comments`);
+          }
+          // Post summary (with findings JSON stripped) as thread reply
+          const cleanOutput = stripFindingsBlock(result.output);
+          const summary = cleanOutput ? extractSummary(cleanOutput) : '';
+          const findingsNote = findings.length > 0
+            ? `\n\n_📝 ${findings.length} inline comment(s) posted on specific lines._`
+            : '';
+          const resultMessage = summary
+            ? `✅ **Squad completed:** \`/squad ${cmd.commandName}\`\n\n${truncateForComment(summary)}${findingsNote}`
+            : `✅ **Squad completed:** \`/squad ${cmd.commandName}\`\n\n_Completed successfully._${findingsNote}`;
 
-        try {
-          replyToThread(cmd.adoContext, cmd.prId, cmd.threadId, resultMessage);
-        } catch {
-          console.log(`  ⚠️ Could not post result to PR thread`);
+          try {
+            replyToThread(cmd.adoContext, cmd.prId, cmd.threadId, resultMessage);
+          } catch {
+            console.log(`  ⚠️ Could not post result to PR thread`);
+          }
+        } else {
+          // Non-review commands: post summary as before
+          const summary = result.output ? extractSummary(result.output) : '';
+          const resultMessage = summary
+            ? `✅ **Squad completed:** \`/squad ${cmd.commandName}\`\n\n${truncateForComment(summary)}`
+            : `✅ **Squad completed:** \`/squad ${cmd.commandName}\`\n\n_Completed successfully._`;
+
+          try {
+            replyToThread(cmd.adoContext, cmd.prId, cmd.threadId, resultMessage);
+          } catch {
+            console.log(`  ⚠️ Could not post result to PR thread`);
+          }
         }
 
         markCommandCompleted(cmd, `Completed by squad`);
@@ -706,3 +770,78 @@ function truncateForComment(text: string, maxLength: number = 8000): string {
   if (text.length <= maxLength) return text;
   return text.slice(0, maxLength) + '\n\n_... (truncated — full output was ' + text.length + ' characters)_';
 }
+
+// ── Review Findings Parser ──────────────────────────────────────
+
+export interface ReviewFinding {
+  file: string;
+  line: number;
+  endLine?: number;
+  severity: 'critical' | 'warning' | 'suggestion' | 'nitpick';
+  title: string;
+  comment: string;
+}
+
+/**
+ * Parse structured review findings from agent output.
+ *
+ * The agent is prompted to emit a JSON array between markers:
+ *   <!-- REVIEW_FINDINGS_START -->
+ *   [ { "file": "...", "line": N, ... }, ... ]
+ *   <!-- REVIEW_FINDINGS_END -->
+ *
+ * Returns the parsed findings array, or an empty array if not found / invalid.
+ */
+export function parseReviewFindings(raw: string): ReviewFinding[] {
+  const startMarker = '<!-- REVIEW_FINDINGS_START -->';
+  const endMarker = '<!-- REVIEW_FINDINGS_END -->';
+
+  const startIdx = raw.indexOf(startMarker);
+  const endIdx = raw.indexOf(endMarker);
+  if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) return [];
+
+  const jsonStr = raw.slice(startIdx + startMarker.length, endIdx).trim();
+  if (!jsonStr) return [];
+
+  try {
+    const parsed = JSON.parse(jsonStr);
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed.filter(
+      (f: unknown): f is ReviewFinding =>
+        typeof f === 'object' && f !== null &&
+        typeof (f as Record<string, unknown>).file === 'string' &&
+        typeof (f as Record<string, unknown>).line === 'number' &&
+        typeof (f as Record<string, unknown>).comment === 'string',
+    ).map((f: ReviewFinding) => ({
+      file: f.file,
+      line: f.line,
+      endLine: typeof f.endLine === 'number' ? f.endLine : undefined,
+      severity: (['critical', 'warning', 'suggestion', 'nitpick'] as const).includes(f.severity) ? f.severity : 'suggestion',
+      title: typeof f.title === 'string' ? f.title : '',
+      comment: f.comment,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Strip the REVIEW_FINDINGS block from agent output so the summary
+ * text doesn't include the raw JSON.
+ */
+export function stripFindingsBlock(raw: string): string {
+  const startMarker = '<!-- REVIEW_FINDINGS_START -->';
+  const endMarker = '<!-- REVIEW_FINDINGS_END -->';
+  const startIdx = raw.indexOf(startMarker);
+  const endIdx = raw.indexOf(endMarker);
+  if (startIdx === -1 || endIdx === -1) return raw;
+  return (raw.slice(0, startIdx) + raw.slice(endIdx + endMarker.length)).trim();
+}
+
+const SEVERITY_EMOJI: Record<string, string> = {
+  critical: '🔴',
+  warning: '🟡',
+  suggestion: '💡',
+  nitpick: '📝',
+};

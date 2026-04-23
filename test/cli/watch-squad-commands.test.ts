@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { findSquadCommands, type PullRequestThread, type AdoContext } from '../../packages/squad-cli/src/cli/commands/watch/capabilities/ado-pr-threads.js';
-import { extractSummary } from '../../packages/squad-cli/src/cli/commands/watch/capabilities/squad-commands.js';
+import { extractSummary, parseReviewFindings, stripFindingsBlock } from '../../packages/squad-cli/src/cli/commands/watch/capabilities/squad-commands.js';
 
 const mockAdoCtx: AdoContext = {
   org: 'msazure',
@@ -202,5 +202,98 @@ Recommend merge.`;
     // Falls back to full output since there's nothing after the tool logs
     const result = extractSummary(raw);
     expect(result).toBeTruthy();
+  });
+});
+
+// ── parseReviewFindings tests ──────────────────────────────
+
+describe('parseReviewFindings', () => {
+  it('parses valid findings between markers', () => {
+    const raw = `Some preamble
+
+<!-- REVIEW_FINDINGS_START -->
+[
+  { "file": "src/main.go", "line": 42, "severity": "critical", "title": "Nil deref", "comment": "Missing nil check" },
+  { "file": "pkg/util.go", "line": 10, "endLine": 15, "severity": "suggestion", "title": "Simplify", "comment": "Could use helper" }
+]
+<!-- REVIEW_FINDINGS_END -->
+
+Overall looks good.`;
+
+    const findings = parseReviewFindings(raw);
+    expect(findings).toHaveLength(2);
+    expect(findings[0]).toMatchObject({ file: 'src/main.go', line: 42, severity: 'critical', title: 'Nil deref' });
+    expect(findings[1]).toMatchObject({ file: 'pkg/util.go', line: 10, endLine: 15, severity: 'suggestion' });
+  });
+
+  it('returns empty array when no markers present', () => {
+    expect(parseReviewFindings('Just a normal review summary.')).toEqual([]);
+  });
+
+  it('returns empty array for malformed JSON', () => {
+    const raw = `<!-- REVIEW_FINDINGS_START -->
+not valid json {{{
+<!-- REVIEW_FINDINGS_END -->`;
+    expect(parseReviewFindings(raw)).toEqual([]);
+  });
+
+  it('returns empty array when findings is not an array', () => {
+    const raw = `<!-- REVIEW_FINDINGS_START -->
+{ "file": "a.go", "line": 1, "comment": "test" }
+<!-- REVIEW_FINDINGS_END -->`;
+    expect(parseReviewFindings(raw)).toEqual([]);
+  });
+
+  it('filters out findings missing required fields', () => {
+    const raw = `<!-- REVIEW_FINDINGS_START -->
+[
+  { "file": "a.go", "line": 1, "comment": "valid" },
+  { "file": "b.go", "comment": "missing line" },
+  { "line": 5, "comment": "missing file" }
+]
+<!-- REVIEW_FINDINGS_END -->`;
+    const findings = parseReviewFindings(raw);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.file).toBe('a.go');
+  });
+
+  it('defaults severity to suggestion for unknown values', () => {
+    const raw = `<!-- REVIEW_FINDINGS_START -->
+[{ "file": "a.go", "line": 1, "severity": "mega-critical", "comment": "test" }]
+<!-- REVIEW_FINDINGS_END -->`;
+    const findings = parseReviewFindings(raw);
+    expect(findings[0]!.severity).toBe('suggestion');
+  });
+
+  it('handles empty findings array', () => {
+    const raw = `<!-- REVIEW_FINDINGS_START -->
+[]
+<!-- REVIEW_FINDINGS_END -->`;
+    expect(parseReviewFindings(raw)).toEqual([]);
+  });
+});
+
+// ── stripFindingsBlock tests ────────────────────────────────
+
+describe('stripFindingsBlock', () => {
+  it('strips the findings block from output', () => {
+    const raw = `Preamble text.
+
+<!-- REVIEW_FINDINGS_START -->
+[{ "file": "a.go", "line": 1, "comment": "test" }]
+<!-- REVIEW_FINDINGS_END -->
+
+Summary text here.`;
+
+    const result = stripFindingsBlock(raw);
+    expect(result).toContain('Preamble text.');
+    expect(result).toContain('Summary text here.');
+    expect(result).not.toContain('REVIEW_FINDINGS');
+    expect(result).not.toContain('"file"');
+  });
+
+  it('returns original text when no markers present', () => {
+    const raw = 'Just a summary.';
+    expect(stripFindingsBlock(raw)).toBe(raw);
   });
 });
