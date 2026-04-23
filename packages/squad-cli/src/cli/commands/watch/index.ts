@@ -1177,19 +1177,23 @@ export async function runWatch(dest: string, options: WatchOptions | WatchConfig
 
     // /squad command scanning — check PR threads for /squad commands
     if (crossRepoPrData.length > 0) {
+      console.log(`${DIM}  🔍 Scanning ${crossRepoPrData.length} repo(s) for /squad commands...${RESET}`);
       const allCommands = [];
       for (const repoData of crossRepoPrData) {
         try {
           const adoCtx = getAdoContext(repoData.path, repoData.name);
           if (!adoCtx) {
-            vlog?.log(`[${repoData.name}] Could not resolve ADO context — skipping /squad scan`);
+            console.log(`${YELLOW}  ⚠${RESET} [${repoData.name}] Could not resolve ADO context for path="${repoData.path}" — skipping /squad scan`);
             continue;
           }
+          console.log(`${DIM}  [${repoData.name}] ADO context: ${adoCtx.org}/${adoCtx.project}/${adoCtx.repoName} (${adoCtx.repoId.slice(0, 8)}...)${RESET}`);
+          console.log(`${DIM}  [${repoData.name}] Scanning ${repoData.prIds.length} PR thread(s)...${RESET}`);
           const state = loadCommandState(teamRoot);
           const commands = await scanRepoForCommands(repoData.name, adoCtx, repoData.prIds, state, repoData.path);
+          console.log(`${DIM}  [${repoData.name}] Found ${commands.length} /squad command(s)${RESET}`);
           allCommands.push(...commands);
         } catch (e) {
-          vlog?.log(`[${repoData.name}] /squad command scan failed: ${(e as Error).message}`);
+          console.log(`${YELLOW}  ⚠${RESET} [${repoData.name}] /squad command scan failed: ${(e as Error).message}`);
         }
       }
       if (allCommands.length > 0) {

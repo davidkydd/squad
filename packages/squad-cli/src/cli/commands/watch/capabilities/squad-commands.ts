@@ -14,8 +14,8 @@
  * 5. Mark original comment as completed
  */
 
-import { execFile, type ChildProcess } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { execFile, execFileSync, type ChildProcess } from 'node:child_process';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import type { WatchCapability, WatchContext, PreflightResult, CapabilityResult } from '../types.js';
 import { createVerboseLogger } from '../verbose.js';
@@ -252,7 +252,6 @@ function loadSkillsFromDir(dir: string, label: string): string {
   const skillsDir = path.join(dir, '.squad', 'skills');
   if (!existsSync(skillsDir)) return '';
 
-  const { readdirSync } = require('node:fs') as typeof import('node:fs');
   const files = readdirSync(skillsDir).filter((f: string) => f.endsWith('.md'));
   if (files.length === 0) return '';
 
@@ -370,8 +369,7 @@ export interface CrossRepoSquadCommandsConfig {
  */
 export function resolveAdoContext(repoPath: string): AdoContext | null {
   try {
-    const { execFileSync: execSync } = require('node:child_process') as typeof import('node:child_process');
-    const remoteUrl = execSync(
+    const remoteUrl = execFileSync(
       'git', ['remote', 'get-url', 'origin'],
       { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
     ).trim();
@@ -394,7 +392,8 @@ export function resolveAdoContext(repoPath: string): AdoContext | null {
     const repoId = getRepoId(org, project, repoName);
 
     return { org, project, repoName, repoId };
-  } catch {
+  } catch (e) {
+    console.log(`  \x1b[2m[resolveAdoContext] Failed for ${repoPath}: ${(e as Error).message}\x1b[0m`);
     return null;
   }
 }
@@ -447,8 +446,9 @@ export async function scanRepoForCommands(
       );
 
       allCommands.push(...newCommands);
-    } catch {
-      // Skip PRs where thread listing fails (permissions, etc.)
+    } catch (e) {
+      // Log but skip PRs where thread listing fails (permissions, etc.)
+      console.log(`  ${'\x1b[2m'}[${repoName}] PR #${prId} thread scan error: ${(e as Error).message?.slice(0, 100)}${'\x1b[0m'}`);
     }
   }
 

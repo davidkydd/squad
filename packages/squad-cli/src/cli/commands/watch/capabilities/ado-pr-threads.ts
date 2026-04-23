@@ -78,50 +78,44 @@ export interface AdoContext {
 
 // ── Token Management ─────────────────────────────────────────────
 
-let cachedToken: { value: string; expiresAt: number } | null = null;
-
-function getToken(): string {
-  const now = Date.now();
-  if (cachedToken && cachedToken.expiresAt > now + 60_000) {
-    return cachedToken.value;
-  }
-  const token = execFileSync(
-    'az',
-    ['account', 'get-access-token', '--resource', '499b84ac-1321-427f-aa17-267ca6975798', '--query', 'accessToken', '-o', 'tsv'],
-    AZ_OPTS,
-  ).trim();
-  // Tokens last ~1 hour; cache for 50 minutes
-  cachedToken = { value: token, expiresAt: now + 50 * 60_000 };
-  return token;
-}
+// ADO resource ID for Azure DevOps REST APIs
+const ADO_RESOURCE = '499b84ac-1321-427f-aa17-267ca6975798';
 
 // ── REST Helpers ─────────────────────────────────────────────────
+// Using `az rest --resource` delegates token acquisition to the Azure CLI,
+// which handles caching, refresh, and credential selection automatically.
 
 function adoGet<T>(url: string): T {
-  const token = getToken();
-  const raw = execFileSync('az', ['rest', '--method', 'get', '--url', url, '--headers', `Authorization=Bearer ${token}`], AZ_OPTS);
+  const raw = execFileSync('az', ['rest', '--method', 'get', '--url', url, '--resource', ADO_RESOURCE], AZ_OPTS);
+  if (raw.trimStart().startsWith('<')) {
+    throw new Error('ADO returned HTML instead of JSON (auth redirect or rate limit)');
+  }
   return JSON.parse(raw) as T;
 }
 
 function adoPost<T>(url: string, body: unknown): T {
-  const token = getToken();
   const bodyJson = JSON.stringify(body);
   const raw = execFileSync(
     'az',
-    ['rest', '--method', 'post', '--url', url, '--headers', `Authorization=Bearer ${token}`, 'Content-Type=application/json', '--body', bodyJson],
+    ['rest', '--method', 'post', '--url', url, '--resource', ADO_RESOURCE, '--body', bodyJson],
     AZ_OPTS,
   );
+  if (raw.trimStart().startsWith('<')) {
+    throw new Error('ADO returned HTML instead of JSON (auth redirect or rate limit)');
+  }
   return JSON.parse(raw) as T;
 }
 
 function adoPatch<T>(url: string, body: unknown): T {
-  const token = getToken();
   const bodyJson = JSON.stringify(body);
   const raw = execFileSync(
     'az',
-    ['rest', '--method', 'patch', '--url', url, '--headers', `Authorization=Bearer ${token}`, 'Content-Type=application/json', '--body', bodyJson],
+    ['rest', '--method', 'patch', '--url', url, '--resource', ADO_RESOURCE, '--body', bodyJson],
     AZ_OPTS,
   );
+  if (raw.trimStart().startsWith('<')) {
+    throw new Error('ADO returned HTML instead of JSON (auth redirect or rate limit)');
+  }
   return JSON.parse(raw) as T;
 }
 
@@ -225,7 +219,9 @@ export function findSquadCommands(
 
     // Only look at the root comment (first comment in thread)
     const rootComment = thread.comments[0]!;
-    const content = rootComment.content.trim();
+    if (!rootComment.content) continue;
+    // ADO comments may be HTML-wrapped — strip tags for matching
+    const content = rootComment.content.replace(/<[^>]*>/g, '').trim();
 
     // Skip if already processed (contains completion or in-progress marker)
     if (content.includes('✅') || content.includes('⏳')) continue;
