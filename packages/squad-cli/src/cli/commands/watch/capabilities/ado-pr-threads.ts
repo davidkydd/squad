@@ -319,7 +319,7 @@ export function getPrPolicyEvaluations(ctx: AdoContext, prId: number): PolicyEva
   try {
     // The policy evaluation endpoint uses the project scope, not repo-scoped
     const artifactId = `vstfs:///CodeReview/CodeReviewId/${encodeURIComponent(ctx.project)}/${prId}`;
-    const url = `https://dev.azure.com/${ctx.org}/${ctx.project}/_apis/policy/evaluations?artifactId=${encodeURIComponent(artifactId)}&api-version=7.1`;
+    const url = `https://dev.azure.com/${ctx.org}/${ctx.project}/_apis/policy/evaluations?artifactId=${encodeURIComponent(artifactId)}&api-version=7.1-preview`;
     const result = adoGet<{
       value: Array<{
         configuration: { id: number; type: { displayName: string }; isEnabled: boolean; isBlocking: boolean };
