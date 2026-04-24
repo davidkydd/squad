@@ -285,6 +285,102 @@ export function getPrDetails(ctx: AdoContext, prId: number): PrDetails | null {
   }
 }
 
+// ── PR Policy & Thread Pre-Fetch ─────────────────────────────────
+// Pre-fetch data the babysit agent needs, since the agent sandbox
+// blocks `az repos pr` CLI commands. We use `az rest --resource` which works.
+
+export interface PolicyEvaluation {
+  configurationId: number;
+  displayName: string;
+  status: string;    // 'approved' | 'rejected' | 'running' | 'queued' | 'notApplicable' | 'broken'
+  isBlocking: boolean;
+  buildUrl?: string;
+  context?: string;
+}
+
+export interface PrThreadSummary {
+  totalThreads: number;
+  activeThreads: number;
+  resolvedThreads: number;
+  threads: Array<{
+    id: number;
+    status: string;
+    firstComment: string;
+    author: string;
+    isSystemThread: boolean;
+  }>;
+}
+
+/**
+ * Fetch PR policy evaluations (build gates, reviewer requirements, etc.)
+ * via the ADO REST API. Returns null on failure.
+ */
+export function getPrPolicyEvaluations(ctx: AdoContext, prId: number): PolicyEvaluation[] | null {
+  try {
+    // The policy evaluation endpoint uses the project scope, not repo-scoped
+    const artifactId = `vstfs:///CodeReview/CodeReviewId/${encodeURIComponent(ctx.project)}/${prId}`;
+    const url = `https://dev.azure.com/${ctx.org}/${ctx.project}/_apis/policy/evaluations?artifactId=${encodeURIComponent(artifactId)}&api-version=7.1`;
+    const result = adoGet<{
+      value: Array<{
+        configuration: { id: number; type: { displayName: string }; isEnabled: boolean; isBlocking: boolean };
+        status: string;
+        context?: { buildId?: number; isExpired?: boolean };
+      }>;
+    }>(url);
+
+    return (result.value ?? []).map((ev) => ({
+      configurationId: ev.configuration?.id ?? 0,
+      displayName: ev.configuration?.type?.displayName ?? 'Unknown',
+      status: ev.status ?? 'unknown',
+      isBlocking: ev.configuration?.isBlocking ?? false,
+      buildUrl: ev.context?.buildId
+        ? `https://dev.azure.com/${ctx.org}/${ctx.project}/_build/results?buildId=${ev.context.buildId}`
+        : undefined,
+      context: ev.context?.isExpired ? 'expired' : undefined,
+    }));
+  } catch (e) {
+    console.log(`  ⚠️ Could not fetch PR policy evaluations: ${(e as Error).message}`);
+    return null;
+  }
+}
+
+/**
+ * Summarize PR threads: active/resolved counts and first comment of each.
+ * Useful for babysit to know what comment threads need resolution.
+ */
+export function getPrThreadsSummary(ctx: AdoContext, prId: number): PrThreadSummary | null {
+  try {
+    const threads = listPrThreads(ctx, prId);
+    let active = 0;
+    let resolved = 0;
+
+    const summaries = threads.map((t) => {
+      const isSystem = !t.comments?.length || t.comments[0]?.commentType === 'system';
+      const status = typeof t.status === 'number'
+        ? ['unknown', 'active', 'fixed', 'wontFix', 'closed', 'byDesign', 'pending'][t.status] ?? 'unknown'
+        : String(t.status ?? 'unknown');
+
+      if (status === 'active' || status === 'pending') active++;
+      else resolved++;
+
+      const firstComment = t.comments?.[0]?.content?.slice(0, 200) ?? '';
+      const author = t.comments?.[0]?.author?.displayName ?? 'system';
+
+      return { id: t.id, status, firstComment, author, isSystemThread: isSystem };
+    });
+
+    return {
+      totalThreads: threads.length,
+      activeThreads: active,
+      resolvedThreads: resolved,
+      threads: summaries.filter((s) => !s.isSystemThread), // only human/bot threads
+    };
+  } catch (e) {
+    console.log(`  ⚠️ Could not fetch PR thread summary: ${(e as Error).message}`);
+    return null;
+  }
+}
+
 // ── /squad Command Parsing ───────────────────────────────────────
 
 const SQUAD_CMD_REGEX = /^\/squad\s+(.+)/i;

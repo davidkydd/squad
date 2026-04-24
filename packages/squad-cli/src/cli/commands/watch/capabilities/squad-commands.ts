@@ -24,6 +24,8 @@ import {
   type SquadCommand,
   type PullRequestThread,
   type PrDetails,
+  type PolicyEvaluation,
+  type PrThreadSummary,
   getRepoId,
   listPrThreads,
   findSquadCommands,
@@ -35,6 +37,8 @@ import {
   isKnownCommand,
   getPrDetails,
   createInlineThread,
+  getPrPolicyEvaluations,
+  getPrThreadsSummary,
 } from './ado-pr-threads.js';
 
 const IS_WINDOWS = process.platform === 'win32';
@@ -224,21 +228,58 @@ function buildBabysitPrompt(cmd: SquadCommand): string {
     );
   }
 
+  // Inject pre-fetched policy evaluations
+  const policyEvals = (cmd as SquadCommand & { _policyEvals?: PolicyEvaluation[] | null })._policyEvals;
+  if (policyEvals && policyEvals.length > 0) {
+    lines.push('', '## Policy Evaluations (pre-fetched)');
+    for (const pe of policyEvals) {
+      const blocking = pe.isBlocking ? '🔒 blocking' : '📋 optional';
+      const expired = pe.context === 'expired' ? ' ⏰ EXPIRED' : '';
+      const buildLink = pe.buildUrl ? ` — [build](${pe.buildUrl})` : '';
+      lines.push(`- **${pe.displayName}** — ${pe.status} (${blocking})${expired}${buildLink}`);
+    }
+  } else if (policyEvals === null) {
+    lines.push('', '⚠️ Could not fetch policy evaluations. Use git-based checks as fallback.');
+  } else {
+    lines.push('', '✅ No policy evaluations found for this PR.');
+  }
+
+  // Inject pre-fetched thread summary
+  const threadSummary = (cmd as SquadCommand & { _threadSummary?: PrThreadSummary | null })._threadSummary;
+  if (threadSummary) {
+    lines.push(
+      '',
+      '## Comment Threads (pre-fetched)',
+      `- Total: ${threadSummary.totalThreads} (${threadSummary.activeThreads} active, ${threadSummary.resolvedThreads} resolved)`,
+    );
+    const activeThreads = threadSummary.threads.filter((t) => t.status === 'active' || t.status === 'pending');
+    if (activeThreads.length > 0) {
+      lines.push('', '### Active/Pending Threads:');
+      for (const t of activeThreads) {
+        const preview = t.firstComment.replace(/\n/g, ' ').slice(0, 120);
+        lines.push(`- Thread #${t.id} (${t.status}) by ${t.author}: ${preview}...`);
+      }
+    }
+  } else if (threadSummary === null) {
+    lines.push('', '⚠️ Could not fetch thread summary.');
+  }
+
   lines.push(
     '',
     'TASK: Perform one babysit cycle on this PR. This is NOT continuous monitoring — just one pass.',
     '',
+    'IMPORTANT: The `az repos pr` CLI is NOT available in your environment. All ADO data has been pre-fetched above.',
+    'Use git commands for branch/diff analysis. Use the pre-fetched policy and thread data for ADO state.',
+    '',
     'Steps:',
-    `1. Get PR policy status: az repos pr policy list --id ${cmd.prId} --org https://dev.azure.com/${cmd.adoContext.org} --project ${cmd.adoContext.project} --output json`,
-    '2. Check all policy evaluations (build gates, reviewer requirements, comment threads)',
-    '3. Identify and trigger any untriggered required builds',
-    '4. Check for flaky builds (>50% failure across recent builds = repo-wide flake, skip retry)',
-    '5. Re-queue any expired/broken policy evaluations',
-    '6. Check for unresolved comment threads — resolve self-authored ones if safe',
-    '7. Report current blocking status: what remains before merge-ready',
+    '1. Analyze the pre-fetched policy evaluations above — identify blocking/failing/expired policies',
+    '2. Check if the branch needs rebasing: git fetch origin && git --no-pager log --oneline origin/{target}..origin/{source} | wc -l',
+    '3. Review the pre-fetched comment thread summary — identify unresolved blocking threads',
+    '4. Summarize current blocking status: what remains before merge-ready',
+    '5. Provide actionable next steps for the PR author',
     '',
     'OUTPUT: Write a status report in markdown format.',
-    'Include: ## Policy Status, ## Builds, ## Open Comments, ## Blocking Items, ## Next Steps',
+    'Include: ## Policy Status, ## Branch Status, ## Open Comments, ## Blocking Items, ## Next Steps',
     cmd.commandArgs ? `\nAdditional instructions: ${cmd.commandArgs}` : '',
   );
 
@@ -268,18 +309,32 @@ function buildBumpPrompt(cmd: SquadCommand): string {
     );
   }
 
+  // Inject pre-fetched policy evaluations
+  const policyEvals = (cmd as SquadCommand & { _policyEvals?: PolicyEvaluation[] | null })._policyEvals;
+  if (policyEvals && policyEvals.length > 0) {
+    lines.push('', '## Policy Evaluations (pre-fetched)');
+    for (const pe of policyEvals) {
+      const blocking = pe.isBlocking ? '🔒 blocking' : '📋 optional';
+      const expired = pe.context === 'expired' ? ' ⏰ EXPIRED' : '';
+      const buildLink = pe.buildUrl ? ` — [build](${pe.buildUrl})` : '';
+      lines.push(`- **${pe.displayName}** — ${pe.status} (${blocking})${expired}${buildLink}`);
+    }
+  }
+
   lines.push(
     '',
     'TASK: Perform a one-shot bump — diagnose and resolve blockers.',
     '',
-    'Steps:',
-    `1. Get PR policy status: az repos pr policy list --id ${cmd.prId} --org https://dev.azure.com/${cmd.adoContext.org} --project ${cmd.adoContext.project} --output json`,
-    '2. Diagnose failed gates (build failures, expired checks)',
-    '3. Re-queue expired/broken policy evaluations',
-    '4. Check for merge conflicts',
-    '5. Report what was done and what still blocks',
+    'IMPORTANT: The `az repos pr` CLI is NOT available in your environment. All ADO data has been pre-fetched above.',
+    'Use git commands for branch/diff analysis. Use the pre-fetched policy data for ADO state.',
     '',
-    'OUTPUT: Brief status report of actions taken and remaining blockers.',
+    'Steps:',
+    '1. Analyze the pre-fetched policy evaluations — identify failed/expired/broken gates',
+    '2. Check for merge conflicts: git fetch origin && git merge-base --is-ancestor origin/{target} origin/{source}',
+    '3. If the branch is behind, check rebase status',
+    '4. Report what was found and what still blocks',
+    '',
+    'OUTPUT: Brief status report of blockers and recommended next steps.',
     cmd.commandArgs ? `\nAdditional instructions: ${cmd.commandArgs}` : '',
   );
 
@@ -433,6 +488,23 @@ async function executeSquadCommand(
       if (details) cmd.prDetails = details;
     } catch (e) {
       console.log(`  ⚠️ Could not enrich PR details: ${(e as Error).message}`);
+    }
+  }
+
+  // Step 3b: For babysit/bump commands, pre-fetch policy evaluations and thread summary
+  // since the agent sandbox blocks `az repos pr` CLI commands.
+  if (cmd.commandName === 'babysit' || cmd.commandName === 'bump') {
+    try {
+      (cmd as SquadCommand & { _policyEvals?: PolicyEvaluation[] | null })._policyEvals =
+        getPrPolicyEvaluations(cmd.adoContext, cmd.prId);
+    } catch (e) {
+      console.log(`  ⚠️ Could not pre-fetch policy evaluations: ${(e as Error).message}`);
+    }
+    try {
+      (cmd as SquadCommand & { _threadSummary?: PrThreadSummary | null })._threadSummary =
+        getPrThreadsSummary(cmd.adoContext, cmd.prId);
+    } catch (e) {
+      console.log(`  ⚠️ Could not pre-fetch thread summary: ${(e as Error).message}`);
     }
   }
 
