@@ -318,7 +318,7 @@ export interface PrThreadSummary {
 export function getPrPolicyEvaluations(ctx: AdoContext, prId: number): PolicyEvaluation[] | null {
   try {
     // The policy evaluation endpoint uses the project scope, not repo-scoped
-    const artifactId = `vstfs:///CodeReview/CodeReviewId/${encodeURIComponent(ctx.project)}/${prId}`;
+    const artifactId = `vstfs:///CodeReview/CodeReviewId/${ctx.project}/${prId}`;
     const url = `https://dev.azure.com/${ctx.org}/${ctx.project}/_apis/policy/evaluations?artifactId=${encodeURIComponent(artifactId)}&api-version=7.1-preview`;
     const result = adoGet<{
       value: Array<{
